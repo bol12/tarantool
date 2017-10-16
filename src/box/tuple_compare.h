@@ -43,6 +43,13 @@ struct key_def;
 void
 key_def_set_compare_func(struct key_def *def);
 
+/**
+ * Initialize cmp_aux calculation functions for the key_def.
+ * @param key_def key definition
+ */
+void
+key_def_set_cmp_aux_func(struct key_def *def);
+
 #if defined(__cplusplus)
 } /* extern "C" */
 #endif /* defined(__cplusplus) */

@@ -47,6 +47,8 @@ struct memtx_tree_key_data {
 	const char *key;
 	/** Number of msgpacked search fields. */
 	uint32_t part_count;
+	/** Comparison auxilary information. */
+	cmp_aux_t aux_info;
 };
 
 /**
@@ -55,6 +57,8 @@ struct memtx_tree_key_data {
 struct memtx_tree_data {
 	/* Tuple that this node is represents. */
 	struct tuple *tuple;
+	/** Comparison auxilary information. */
+	cmp_aux_t aux_info;
 };
 
 /**
@@ -69,7 +73,7 @@ static bool
 memtx_tree_data_identical(const struct memtx_tree_data *a,
 			  const struct memtx_tree_data *b)
 {
-	return a->tuple == b->tuple;
+	return a->tuple == b->tuple && cmp_aux_equal(a->aux_info, b->aux_info);
 }
 
 /**
@@ -91,6 +95,7 @@ memtx_tree_data_set(struct memtx_tree_data *data, struct tuple *tuple,
 {
 	(void)key_def;
 	data->tuple = tuple;
+	data->aux_info = tuple_cmp_aux(tuple, key_def);
 }
 
 /**
@@ -103,15 +108,18 @@ memtx_tree_key_data_set(struct memtx_tree_key_data *key_data, const char *key,
 	(void)key_def;
 	key_data->key = key;
 	key_data->part_count = part_count;
+	key_data->aux_info = key_cmp_aux(key, key_def);
 }
 
 #define BPS_TREE_NAME memtx_tree
 #define BPS_TREE_BLOCK_SIZE (512)
 #define BPS_TREE_EXTENT_SIZE MEMTX_EXTENT_SIZE
 #define BPS_TREE_COMPARE(a, b, arg)\
-	tuple_compare((&a)->tuple, (&b)->tuple, arg)
+	tuple_aux_compare((&a)->tuple, (&a)->aux_info, (&b)->tuple,\
+			  (&b)->aux_info, arg)
 #define BPS_TREE_COMPARE_KEY(a, b, arg)\
-	tuple_compare_with_key((&a)->tuple, (b)->key, (b)->part_count, arg)
+	tuple_aux_compare_with_key((&a)->tuple, (&a)->aux_info, (b)->key,\
+				   (b)->part_count, (b)->aux_info, arg)
 #define BPS_TREE_IDENTICAL(a, b) memtx_tree_data_identical(&a, &b)
 #define bps_tree_elem_t struct memtx_tree_data
 #define bps_tree_key_t struct memtx_tree_key_data *
@@ -146,7 +154,8 @@ memtx_tree_qcompare(const void* a, const void *b, void *c)
 	const struct memtx_tree_data *data_a = a;
 	const struct memtx_tree_data *data_b = b;
 	struct key_def *key_def = c;
-	return tuple_compare(data_a->tuple, data_b->tuple, key_def);
+	return tuple_aux_compare(data_a->tuple, data_a->aux_info, data_b->tuple,
+				 data_b->aux_info, key_def);
 }
 
 /* {{{ MemtxTree Iterators ****************************************/
@@ -268,9 +277,10 @@ tree_iterator_next_equal(struct iterator *iterator, struct tuple **ret)
 		memtx_tree_iterator_get_elem(it->tree, &it->tree_iterator);
 	/* Use user key def to save a few loops. */
 	if (res == NULL ||
-	    tuple_compare_with_key(res->tuple, it->key_data.key,
-				   it->key_data.part_count,
-				   it->index_def->key_def) != 0) {
+	    tuple_aux_compare_with_key(res->tuple, res->aux_info,
+				       it->key_data.key, it->key_data.part_count,
+				       it->key_data.aux_info,
+				       it->index_def->key_def) != 0) {
 		iterator->next = tree_iterator_dummie;
 		memtx_tree_data_clear(&it->current);
 		*ret = NULL;
@@ -299,9 +309,10 @@ tree_iterator_prev_equal(struct iterator *iterator, struct tuple **ret)
 		memtx_tree_iterator_get_elem(it->tree, &it->tree_iterator);
 	/* Use user key def to save a few loops. */
 	if (res == NULL ||
-	    tuple_compare_with_key(res->tuple, it->key_data.key,
-				   it->key_data.part_count,
-				   it->index_def->key_def) != 0) {
+	    tuple_aux_compare_with_key(res->tuple, res->aux_info,
+				       it->key_data.key, it->key_data.part_count,
+				       it->key_data.aux_info,
+				       it->index_def->key_def) != 0) {
 		iterator->next = tree_iterator_dummie;
 		memtx_tree_data_clear(&it->current);
 		*ret = NULL;
@@ -549,6 +560,7 @@ memtx_tree_index_get(struct index *base, const char *key,
 	assert(base->def->opts.is_unique &&
 	       part_count == base->def->key_def->part_count);
 	struct memtx_tree_index *index = (struct memtx_tree_index *)base;
+
 	struct memtx_tree_key_data key_data;
 	struct key_def *cmp_def = memtx_tree_index_cmp_def(index);
 	memtx_tree_key_data_set(&key_data, key, part_count, cmp_def);

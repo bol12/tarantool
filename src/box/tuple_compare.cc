@@ -1323,9 +1323,390 @@ tuple_compare_with_key_create(const struct key_def *def)
 
 /* }}} tuple_compare_with_key */
 
+/* {{{ tuple_aux_compare */
+
+#define CMP_HINT_INVALID ((uint64_t)UINT64_MAX)
+
+static int
+tuple_hinted_compare(const struct tuple *tuple_a, cmp_aux_t tuple_a_cmp_aux,
+		     const struct tuple *tuple_b, cmp_aux_t tuple_b_cmp_aux,
+		     struct key_def *key_def)
+{
+	uint64_t tuple_a_hint = tuple_a_cmp_aux.hint;
+	uint64_t tuple_b_hint = tuple_b_cmp_aux.hint;
+	if (likely(tuple_a_hint != tuple_b_hint &&
+		   tuple_a_hint != CMP_HINT_INVALID &&
+		   tuple_b_hint != CMP_HINT_INVALID))
+		return tuple_a_hint < tuple_b_hint ? -1 : 1;
+	else
+		return tuple_compare(tuple_a, tuple_b, key_def);
+}
+
+static tuple_aux_compare_t
+tuple_aux_compare_create(const struct key_def *def)
+{
+	(void)def;
+	return tuple_hinted_compare;
+}
+
+/* }}} tuple_aux_compare */
+
+/* {{{ tuple_aux_compare_with_key */
+
+static int
+tuple_hinted_compare_with_key(const struct tuple *tuple, cmp_aux_t tuple_cmp_aux,
+			      const char *key, uint32_t part_count,
+			      cmp_aux_t key_cmp_aux, struct key_def *key_def)
+{
+	uint64_t tuple_hint = tuple_cmp_aux.hint;
+	uint64_t key_hint = key_cmp_aux.hint;
+	if (likely(tuple_hint != key_hint && tuple_hint != CMP_HINT_INVALID &&
+		   key_hint != CMP_HINT_INVALID))
+		return tuple_hint < key_hint ? -1 : 1;
+	else
+		return tuple_compare_with_key(tuple, key, part_count, key_def);
+}
+
+static tuple_aux_compare_with_key_t
+tuple_aux_compare_with_key_create(const struct key_def *def)
+{
+	(void)def;
+	return tuple_hinted_compare_with_key;
+}
+
+/* }}} tuple_aux_compare_with_key */
+
 void
 key_def_set_compare_func(struct key_def *def)
 {
 	def->tuple_compare = tuple_compare_create(def);
 	def->tuple_compare_with_key = tuple_compare_with_key_create(def);
+	def->tuple_aux_compare = tuple_aux_compare_create(def);
+	def->tuple_aux_compare_with_key =
+		tuple_aux_compare_with_key_create(def);
+}
+
+/* Tuple hints */
+
+static cmp_aux_t
+key_hint_default(const char *key, struct key_def *key_def)
+{
+	(void)key;
+	(void)key_def;
+	cmp_aux_t ret;
+	ret.hint = CMP_HINT_INVALID;
+	return ret;
+}
+
+static cmp_aux_t
+tuple_hint_default(const struct tuple *tuple, struct key_def *key_def)
+{
+	(void)tuple;
+	(void)key_def;
+	cmp_aux_t ret;
+	ret.hint = CMP_HINT_INVALID;
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_uint(const char *key, struct key_def *key_def)
+{
+	(void)key_def;
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_UNSIGNED);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	assert(mp_typeof(*key) == MP_UINT);
+	uint64_t val = mp_decode_uint(&key);
+	ret.hint = unlikely(val > INT64_MAX) ? INT64_MAX :
+		   val - (uint64_t)INT64_MIN;;
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_uint(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_UNSIGNED);
+	cmp_aux_t ret;
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_uint<is_nullable>(field, key_def);
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_int(const char *key, struct key_def *key_def)
+{
+	(void)key_def;
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_INTEGER);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	if (mp_typeof(*key) == MP_UINT) {
+		uint64_t val = mp_decode_uint(&key);
+		ret.hint = unlikely(val > INT64_MAX) ? INT64_MAX :
+			   val - (uint64_t)INT64_MIN;
+	} else {
+		assert(mp_typeof(*key) == MP_INT);
+		int64_t val = mp_decode_int(&key);
+		ret.hint = (uint64_t)val - (uint64_t)INT64_MIN;
+	}
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_int(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_INTEGER);
+	cmp_aux_t ret;
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_int<is_nullable>(field, key_def);
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_number(const char *key, struct key_def *key_def)
+{
+	(void)key_def;
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_NUMBER);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	uint64_t val = 0;
+	switch (mp_typeof(*key)) {
+	case MP_FLOAT:
+	case MP_DOUBLE: {
+		double f = mp_typeof(*key) == MP_FLOAT ?
+			   mp_decode_float(&key) : mp_decode_double(&key);
+		if (isnan(f) || isinf(f)) {
+			ret.hint = CMP_HINT_INVALID;
+			return ret;
+		}
+		double ival;
+		(void)modf(f, &ival);
+		if (unlikely(ival >= (double)INT64_MAX)) {
+			ret.hint = INT64_MAX;
+			return ret;
+		}
+		if (unlikely(ival <= (double)INT64_MIN)) {
+			ret.hint = 0;
+			return ret;
+		}
+		val = (uint64_t)ival;
+		break;
+	}
+	case MP_INT: {
+		val = (uint64_t)mp_decode_int(&key);
+		break;
+	}
+	case MP_UINT: {
+		val = mp_decode_uint(&key);
+		if (val > INT64_MAX) {
+			ret.hint = INT64_MAX;
+			return ret;
+		}
+		break;
+	}
+	default:
+		unreachable();
+	}
+	ret.hint = val - (uint64_t)INT64_MIN;
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_number(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_NUMBER);
+	cmp_aux_t ret;
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_number<is_nullable>(field, key_def);
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_boolean(const char *key, struct key_def *key_def)
+{
+	(void)key_def;
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_BOOLEAN);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	bool val = mp_decode_bool(&key);
+	ret.hint = (uint64_t)val - (uint64_t)INT64_MIN;
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_boolean(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_BOOLEAN);
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	cmp_aux_t ret;
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_boolean<is_nullable>(field, key_def);
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_string(const char *key, struct key_def *key_def)
+{
+	(void)key_def;
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->coll == NULL);
+	assert(key_def->parts->type == FIELD_TYPE_STRING);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	assert(mp_typeof(*key) == MP_STR);
+	uint32_t len;
+	const unsigned char *str =
+		(const unsigned char *)mp_decode_str(&key, &len);
+	uint64_t result = 0;
+	uint32_t process_len = MIN(len, 8);
+	for (uint32_t i = 0; i < process_len; i++) {
+		result <<= 8;
+		result |= str[i];
+	}
+	result <<= 8 * (8 - process_len);
+	ret.hint = result;
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_string(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->coll == NULL);
+	assert(key_def->parts->type == FIELD_TYPE_STRING);
+	cmp_aux_t ret;
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_string<is_nullable>(field, key_def);
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+key_hint_string_coll(const char *key, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_STRING &&
+	        key_def->parts->coll != NULL);
+	cmp_aux_t ret;
+	if (key == NULL || (is_nullable && mp_typeof(*key) == MP_NIL)) {
+		ret.hint = 0;
+		return ret;
+	}
+	assert(mp_typeof(*key) == MP_STR);
+	uint32_t len;
+	const char *str = mp_decode_str(&key, &len);
+	ret.hint = key_def->parts->coll->hint(str, len, key_def->parts->coll);
+	return ret;
+}
+
+template<bool is_nullable>
+static cmp_aux_t
+tuple_hint_string_coll(const struct tuple *tuple, struct key_def *key_def)
+{
+	assert(key_part_is_nullable(key_def->parts) == is_nullable);
+	assert(key_def->parts->type == FIELD_TYPE_STRING &&
+	        key_def->parts->coll != NULL);
+	const char *field = tuple_field_by_part(tuple, key_def->parts);
+	cmp_aux_t ret;
+	if (is_nullable && field == NULL) {
+		ret.hint = 0;
+		return ret;
+	}
+	return key_hint_string_coll<is_nullable>(field, key_def);
+}
+
+void
+key_def_set_cmp_aux_func(struct key_def *def)
+{
+	def->key_cmp_aux = key_hint_default;
+	def->tuple_cmp_aux = tuple_hint_default;
+	bool is_nullable = key_part_is_nullable(def->parts);
+	if (def->parts->type == FIELD_TYPE_STRING && def->parts->coll != NULL) {
+		def->key_cmp_aux = is_nullable ? key_hint_string_coll<true> :
+						 key_hint_string_coll<false>;
+		def->tuple_cmp_aux = is_nullable ?
+				     tuple_hint_string_coll<true> :
+				     tuple_hint_string_coll<false>;
+		return;
+	}
+	switch (def->parts->type) {
+	case FIELD_TYPE_UNSIGNED:
+		def->key_cmp_aux = is_nullable ? key_hint_uint<true> :
+						 key_hint_uint<false>;
+		def->tuple_cmp_aux = is_nullable ? tuple_hint_uint<true> :
+						   tuple_hint_uint<false>;
+		break;
+	case FIELD_TYPE_INTEGER:
+		def->key_cmp_aux = is_nullable ? key_hint_int<true> :
+						 key_hint_int<false>;
+		def->tuple_cmp_aux = is_nullable ? tuple_hint_int<true> :
+						   tuple_hint_int<false>;
+		break;
+	case FIELD_TYPE_STRING:
+		def->key_cmp_aux = is_nullable ? key_hint_string<true> :
+						 key_hint_string<false>;
+		def->tuple_cmp_aux = is_nullable ? tuple_hint_string<true> :
+						   tuple_hint_string<false>;
+		break;
+	case FIELD_TYPE_NUMBER:
+		def->key_cmp_aux = is_nullable ? key_hint_number<true> :
+						 key_hint_number<false>;
+		def->tuple_cmp_aux = is_nullable ? tuple_hint_number<true> :
+						   tuple_hint_number<false>;
+		break;
+	case FIELD_TYPE_BOOLEAN:
+		def->key_cmp_aux = is_nullable ? key_hint_boolean<true> :
+						 key_hint_boolean<false>;
+		def->tuple_cmp_aux = is_nullable ? tuple_hint_boolean<true> :
+						   tuple_hint_boolean<false>;
+		break;
+	default:
+		break;
+	};
 }

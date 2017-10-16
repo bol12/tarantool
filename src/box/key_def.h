@@ -115,6 +115,28 @@ struct key_part {
 
 struct key_def;
 struct tuple;
+/** Comparasion auxiliary information. */
+typedef union {
+	/**
+	 * Hint is a value h(t) is calculated for tuple in terms
+	 * of particular key_def that has follows rules:
+	 * if h(t1) < h(t2) then t1 < t2;
+	 * if h(t1) > h(t2) then t1 > t2;
+	 * if t1 == t2 then h(t1) == h(t2);
+	 * These rules means that instead of direct tuple vs tuple
+	 * (or tuple vs key) comparison one may compare theirs
+	 * hints first; and only if theirs hints are equal compare
+	 * the tuples themselves.
+	 */
+	uint64_t hint;
+} cmp_aux_t;
+
+/** Test if cmp_aux_t a and b are equal. */
+static inline bool
+cmp_aux_equal(cmp_aux_t a, cmp_aux_t b)
+{
+	return a.hint == b.hint;
+}
 
 /**
  * Get is_nullable property of key_part.
@@ -137,6 +159,18 @@ typedef int (*tuple_compare_with_key_t)(const struct tuple *tuple_a,
 typedef int (*tuple_compare_t)(const struct tuple *tuple_a,
 			       const struct tuple *tuple_b,
 			       struct key_def *key_def);
+/** @copydoc tuple_aux_compare_with_key() */
+typedef int (*tuple_aux_compare_with_key_t)(const struct tuple *tuple,
+					    cmp_aux_t tuple_cmp_aux,
+					    const char *key, uint32_t part_count,
+					    cmp_aux_t key_cmp_aux,
+					    struct key_def *key_def);
+/** @copydoc tuple_aux_compare() */
+typedef int (*tuple_aux_compare_t)(const struct tuple *tuple_a,
+				   cmp_aux_t tuple_a_cmp_aux,
+				   const struct tuple *tuple_b,
+				   cmp_aux_t tuple_b_cmp_aux,
+				   struct key_def *key_def);
 /** @copydoc tuple_extract_key() */
 typedef char *(*tuple_extract_key_t)(const struct tuple *tuple,
 				     struct key_def *key_def,
@@ -153,12 +187,23 @@ typedef uint32_t (*tuple_hash_t)(const struct tuple *tuple,
 typedef uint32_t (*key_hash_t)(const char *key,
 				struct key_def *key_def);
 
+/** @copydoc tuple_cmp_aux() */
+typedef cmp_aux_t (*tuple_cmp_aux_t)(const struct tuple *tuple,
+				     struct key_def *key_def);
+
+/** @copydoc key_cmp_aux() */
+typedef cmp_aux_t (*key_cmp_aux_t)(const char *key, struct key_def *key_def);
+
 /* Definition of a multipart key. */
 struct key_def {
 	/** @see tuple_compare() */
 	tuple_compare_t tuple_compare;
 	/** @see tuple_compare_with_key() */
 	tuple_compare_with_key_t tuple_compare_with_key;
+	/** @see tuple_aux_compare_with_key() */
+	tuple_aux_compare_with_key_t tuple_aux_compare_with_key;
+	/** @see tuple_aux_compare() */
+	tuple_aux_compare_t tuple_aux_compare;
 	/** @see tuple_extract_key() */
 	tuple_extract_key_t tuple_extract_key;
 	/** @see tuple_extract_key_raw() */
@@ -167,6 +212,10 @@ struct key_def {
 	tuple_hash_t tuple_hash;
 	/** @see key_hash() */
 	key_hash_t key_hash;
+	/** @see tuple_cmp_aux() */
+	tuple_cmp_aux_t tuple_cmp_aux;
+	/** @see key_cmp_aux() */
+	key_cmp_aux_t key_cmp_aux;
 	/**
 	 * Minimal part count which always is unique. For example,
 	 * if a secondary index is unique, then
@@ -572,6 +621,52 @@ tuple_compare_with_key(const struct tuple *tuple, const char *key,
 }
 
 /**
+ * Compare tuples using the key definition and comparasion
+ * auxillary information.
+ * @param tuple_a First tuple.
+ * @param tuple_a_cmp_aux Comparasion auxiliary information
+ *                        for the tuple_a.
+ * @param tuple_b Second tuple.
+ * @param tuple_b_cmp_aux Comparasion auxilary information
+ *                        for the tuple_b.
+ * @param key_def Key definition.
+ * @retval 0  if key_fields(tuple_a) == key_fields(tuple_b)
+ * @retval <0 if key_fields(tuple_a) < key_fields(tuple_b)
+ * @retval >0 if key_fields(tuple_a) > key_fields(tuple_b)
+ */
+static inline int
+tuple_aux_compare(const struct tuple *tuple_a, cmp_aux_t tuple_a_cmp_aux,
+		  const struct tuple *tuple_b, cmp_aux_t tuple_b_cmp_aux,
+		  struct key_def *key_def)
+{
+	return key_def->tuple_aux_compare(tuple_a, tuple_a_cmp_aux, tuple_b,
+					  tuple_b_cmp_aux, key_def);
+}
+
+/**
+ * Compare tuple with key using the key definition and
+ * comparasion auxilary information.
+ * @param tuple tuple
+ * @param tuple_cmp_aux tuple compare auxiliary information.
+ * @param key key parts without MessagePack array header
+ * @param part_count the number of parts in @a key
+ * @param key_cmp_aux t Key compare auxiliary information.
+ * @param key_def key definition
+ * @retval 0  if key_fields(tuple) == parts(key)
+ * @retval <0 if key_fields(tuple) < parts(key)
+ * @retval >0 if key_fields(tuple) > parts(key)
+ */
+static inline int
+tuple_aux_compare_with_key(const struct tuple *tuple, cmp_aux_t tuple_cmp_aux,
+			   const char *key, uint32_t part_count,
+			   cmp_aux_t key_cmp_aux, struct key_def *key_def)
+{
+	return key_def->tuple_aux_compare_with_key(tuple, tuple_cmp_aux, key,
+						   part_count, key_cmp_aux,
+						   key_def);
+}
+
+/**
  * Compute hash of a tuple field.
  * @param ph1 - pointer to running hash
  * @param pcarry - pointer to carry
@@ -622,6 +717,30 @@ static inline uint32_t
 key_hash(const char *key, struct key_def *key_def)
 {
 	return key_def->key_hash(key, key_def);
+}
+
+ /*
+ * Get a comparison auxiliary information for a tuple.
+ * @param tuple - tuple to get cmp_aux_t of.
+ * @param key_def - key_def that defines which comparison is used.
+ * @return the comparison auxiliary information.
+ */
+static inline cmp_aux_t
+tuple_cmp_aux(const struct tuple *tuple, struct key_def *key_def)
+{
+	return key_def->tuple_cmp_aux(tuple, key_def);
+}
+
+/**
+ * Get a comparison hint of a key.
+ * @param key - key to get hint of.
+ * @param key_def - key_def that defines which comparison is used.
+ * @return the comparison auxiliary information.
+ */
+static inline cmp_aux_t
+key_cmp_aux(const char *key, struct key_def *key_def)
+{
+	return key_def->key_cmp_aux(key, key_def);
 }
 
 #if defined(__cplusplus)

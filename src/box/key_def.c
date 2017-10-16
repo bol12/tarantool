@@ -136,6 +136,7 @@ key_def_set_func(struct key_def *def)
 	key_def_set_compare_func(def);
 	key_def_set_hash_func(def);
 	key_def_set_extract_func(def);
+	key_def_set_cmp_aux_func(def);
 }
 
 static void
