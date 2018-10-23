@@ -95,11 +95,11 @@ swim_test_uuid_update(void)
 	struct swim *s = swim_cluster_node(cluster, 0);
 	struct tt_uuid new_uuid = uuid_nil;
 	new_uuid.time_low = 1000;
-	is(swim_cfg(s, NULL, -1, &new_uuid), 0, "UUID update");
+	is(swim_cfg(s, NULL, -1, -1, &new_uuid), 0, "UUID update");
 	is(swim_cluster_wait_fullmesh(cluster, 1), 0,
 	   "old UUID is returned back as a 'ghost' member");
 	new_uuid.time_low = 2;
-	is(swim_cfg(s, NULL, -1, &new_uuid), -1,
+	is(swim_cfg(s, NULL, -1, -1, &new_uuid), -1,
 	   "can not update to an existing UUID - swim_cfg fails");
 	ok(swim_error_check_match("exists"), "diag says 'exists'");
 	swim_cluster_delete(cluster);
@@ -117,16 +117,16 @@ swim_test_cfg(void)
 
 	struct swim *s = swim_new();
 	assert(s != NULL);
-	is(swim_cfg(s, NULL, -1, NULL), -1, "first cfg failed - no URI");
+	is(swim_cfg(s, NULL, -1, -1, NULL), -1, "first cfg failed - no URI");
 	ok(swim_error_check_match("mandatory"), "diag says 'mandatory'");
 	const char *uri = "127.0.0.1:1";
-	is(swim_cfg(s, uri, -1, NULL), -1, "first cfg failed - no UUID");
+	is(swim_cfg(s, uri, -1, -1, NULL), -1, "first cfg failed - no UUID");
 	ok(swim_error_check_match("mandatory"), "diag says 'mandatory'");
 	struct tt_uuid uuid = uuid_nil;
 	uuid.time_low = 1;
-	is(swim_cfg(s, uri, -1, &uuid), 0, "configured first time");
-	is(swim_cfg(s, NULL, -1, NULL), 0, "second time can omit URI, UUID");
-	is(swim_cfg(s, NULL, 2, NULL), 0, "hearbeat is dynamic");
+	is(swim_cfg(s, uri, -1, -1, &uuid), 0, "configured first time");
+	is(swim_cfg(s, NULL, -1, -1, NULL), 0, "second time can omit URI, UUID");
+	is(swim_cfg(s, NULL, 2, 2, NULL), 0, "hearbeat is dynamic");
 
 	struct swim *s2 = swim_new();
 	assert(s2 != NULL);
@@ -135,14 +135,16 @@ swim_test_cfg(void)
 	const char *bad_uri3 = "unix/:/home/gerold103/any/dir";
 	struct tt_uuid uuid2 = uuid_nil;
 	uuid2.time_low = 2;
-	is(swim_cfg(s2, bad_uri1, -1, &uuid2), -1, "can not use invalid URI");
+	is(swim_cfg(s2, bad_uri1, -1, -1, &uuid2), -1,
+	   "can not use invalid URI");
 	ok(swim_error_check_match("invalid uri"), "diag says 'invalid uri'");
-	is(swim_cfg(s2, bad_uri2, -1, &uuid2), -1, "can not use domain names");
+	is(swim_cfg(s2, bad_uri2, -1, -1, &uuid2), -1,
+	   "can not use domain names");
 	ok(swim_error_check_match("invalid uri"), "diag says 'invalid uri'");
-	is(swim_cfg(s2, bad_uri3, -1, &uuid2), -1,
+	is(swim_cfg(s2, bad_uri3, -1, -1, &uuid2), -1,
 		    "UNIX sockets are not supported");
 	ok(swim_error_check_match("only IP"), "diag says 'only IP'");
-	is(swim_cfg(s2, uri, -1, &uuid2), -1,
+	is(swim_cfg(s2, uri, -1, -1, &uuid2), -1,
 		    "can not bind to an occupied port");
 	ok(swim_error_check_match("bind"), "diag says 'bind'");
 	swim_delete(s2);
