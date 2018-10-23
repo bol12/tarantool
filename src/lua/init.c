@@ -58,6 +58,7 @@
 #include "lua/fio.h"
 #include "lua/httpc.h"
 #include "lua/utf8.h"
+#include "lua/swim.h"
 #include "digest.h"
 #include <small/ibuf.h>
 
@@ -116,7 +117,8 @@ extern char strict_lua[],
 	trigger_lua[],
 	string_lua[],
 	p_lua[], /* LuaJIT 2.1 profiler */
-	zone_lua[] /* LuaJIT 2.1 profiler */;
+	zone_lua[], /* LuaJIT 2.1 profiler */
+	swim_lua[];
 
 static const char *lua_modules[] = {
 	/* Make it first to affect load of all other modules */
@@ -160,6 +162,7 @@ static const char *lua_modules[] = {
 	/* Profiler */
 	"jit.p", p_lua,
 	"jit.zone", zone_lua,
+	"swim", swim_lua,
 	NULL
 };
 
@@ -450,6 +453,7 @@ tarantool_lua_init(const char *tarantool_bin, int argc, char **argv)
 	tarantool_lua_socket_init(L);
 	tarantool_lua_pickle_init(L);
 	tarantool_lua_digest_init(L);
+	tarantool_lua_swim_init(L);
 	luaopen_http_client_driver(L);
 	lua_pop(L, 1);
 	luaopen_msgpack(L);
