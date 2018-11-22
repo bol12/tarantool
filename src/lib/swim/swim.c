@@ -388,6 +388,13 @@ struct swim {
 	struct rlist queue_events;
 };
 
+/** Reset cached round message on any change of any member. */
+static inline void
+cached_round_msg_invalidate(struct swim *swim)
+{
+	swim_packet_create(&swim->round_step_task.packet);
+}
+
 /** Put the member into a list of ACK waiters. */
 static void
 swim_wait_ack(struct swim *swim, struct swim_member *member)
@@ -416,6 +423,7 @@ swim_register_event(struct swim *swim, struct swim_member *member)
 				     in_queue_events);
 	}
 	member->status_ttl = mh_size(swim->members);
+	cached_round_msg_invalidate(swim);
 }
 
 /**
@@ -584,6 +592,7 @@ swim_delete_member(struct swim *swim, struct swim_member *member)
 	mh_int_t rc = mh_swim_table_find(swim->members, key, NULL);
 	assert(rc != mh_end(swim->members));
 	mh_swim_table_del(swim->members, rc, NULL);
+	cached_round_msg_invalidate(swim);
 	rlist_del_entry(member, in_round_queue);
 
 	/* Failure detection component. */
@@ -836,8 +845,11 @@ swim_encode_dissemination(struct swim *swim, struct swim_packet *packet)
 
 /** Encode SWIM components into a UDP packet. */
 static void
-swim_encode_round_msg(struct swim *swim, struct swim_packet *packet)
+swim_encode_round_msg(struct swim *swim)
 {
+	if (swim_packet_body_size(&swim->round_step_task.packet) > 0)
+		return;
+	struct swim_packet *packet = &swim->round_step_task.packet;
 	swim_packet_create(packet);
 	char *header = swim_packet_alloc(packet, 1);
 	int map_size = 0;
@@ -869,8 +881,10 @@ swim_decrease_events_ttl(struct swim *swim)
 				 tmp) {
 		if (member->old_uuid_ttl > 0)
 			--member->old_uuid_ttl;
-		if (--member->status_ttl == 0)
+		if (--member->status_ttl == 0) {
 			rlist_del_entry(member, in_queue_events);
+			cached_round_msg_invalidate(swim);
+		}
 	}
 }
 
@@ -895,8 +909,7 @@ swim_begin_step(struct ev_loop *loop, struct ev_timer *t, int events)
 	 */
 	if (rlist_empty(&swim->round_queue))
 		return;
-
-	swim_encode_round_msg(swim, &swim->round_step_task.packet);
+	swim_encode_round_msg(swim);
 	struct swim_member *m =
 		rlist_first_entry(&swim->round_queue, struct swim_member,
 				  in_round_queue);
