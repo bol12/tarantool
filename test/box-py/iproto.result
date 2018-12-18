@@ -137,6 +137,10 @@ space:drop()
 space2:drop()
 ---
 ...
+box.space._cluster:delete(2)
+---
+- [2, '0d5bd431-7f3e-4695-a5c2-82de0a9cbc95']
+...
 space = box.schema.create_space('gh1280', { engine = 'vinyl' })
 ---
 ...
