@@ -273,6 +273,16 @@ struct swim_member {
 	 * learn its dead status.
 	 */
 	int status_ttl;
+	/** Arbitrary user data, disseminated on each change. */
+	char *payload;
+	/** Payload size, in bytes. */
+	int payload_size;
+	/**
+	 * TTL of payload. At most this number of times payload is
+	 * sent as a part of dissemination component. Reset on
+	 * each update.
+	 */
+	int payload_ttl;
 	/**
 	 * Events are put into a queue sorted by event occurrence
 	 * time.
@@ -445,6 +455,14 @@ swim_on_member_uuid_update(struct swim *swim, struct swim_member *member)
 	swim_register_event(swim, member);
 }
 
+/** Make all needed actions to process member's payload update. */
+static void
+swim_on_member_payload_update(struct swim *swim, struct swim_member *member)
+{
+	member->payload_ttl = mh_size(swim->members);
+	swim_register_event(swim, member);
+}
+
 /**
  * Update status and incarnation of the member if needed. Statuses
  * are compared as a compound key: {incarnation, status}. So @a
@@ -499,6 +517,31 @@ swim_by_scheduler(struct swim_scheduler *scheduler)
 }
 
 /**
+ * Update members payload if necessary. If a payload is the same -
+ * nothing happens. Fortunately, memcmp here is not expensive,
+ * because 1) payload change is extra rare event usually,
+ * 2) max payload size is very limited.
+ */
+static inline int
+swim_update_member_payload(struct swim *swim, struct swim_member *member,
+			   const char *payload, int payload_size)
+{
+	if (payload_size == member->payload_size &&
+	    memcmp(payload, member->payload, payload_size) == 0)
+		return 0;
+	char *new_payload = (char *) realloc(member->payload, payload_size);
+	if (new_payload == NULL) {
+		diag_set(OutOfMemory, payload_size, "realloc", "new_payload");
+		return -1;
+	}
+	memcpy(new_payload, payload, payload_size);
+	member->payload = new_payload;
+	member->payload_size = payload_size;
+	swim_on_member_payload_update(swim, member);
+	return 0;
+}
+
+/**
  * Once a ping is sent, the member should start waiting for an
  * ACK.
  */
@@ -531,6 +574,7 @@ swim_member_delete(struct swim_member *member)
 
 	/* Dissemination component. */
 	assert(rlist_empty(&member->in_queue_events));
+	free(member->payload);
 
 	free(member);
 }
@@ -623,7 +667,7 @@ swim_find_member(struct swim *swim, const struct tt_uuid *uuid)
 static struct swim_member *
 swim_new_member(struct swim *swim, const struct sockaddr_in *addr,
 		const struct tt_uuid *uuid, enum swim_member_status status,
-		uint64_t incarnation)
+		uint64_t incarnation, const char *payload, int payload_size)
 {
 	int new_bsize = sizeof(swim->shuffled[0]) *
 			(mh_size(swim->members) + 1);
@@ -659,6 +703,11 @@ swim_new_member(struct swim *swim, const struct sockaddr_in *addr,
 
 	/* Dissemination component. */
 	swim_on_member_status_update(swim, member);
+	if (swim_update_member_payload(swim, member, payload,
+				       payload_size) != 0) {
+		swim_delete_member(swim, member);
+		return NULL;
+	}
 
 	say_verbose("SWIM %d: member %s is added, total is %d", swim_fd(swim),
 		    swim_uuid_str(&member->uuid), mh_size(swim->members));
@@ -736,12 +785,15 @@ swim_encode_anti_entropy(struct swim *swim, struct swim_packet *packet)
 	for (mh_int_t rc = mh_swim_table_random(t, rnd), end = mh_end(t);
 	     i < member_count; ++i) {
 		struct swim_member *m = *mh_swim_table_node(t, rc);
-		int new_size = size + sizeof(member_bin);
+		int payload_off = size + sizeof(member_bin);
+		int new_size = payload_off + m->payload_size;
 		if (swim_packet_reserve(packet, new_size) == NULL)
 			break;
 		swim_member_bin_fill(&member_bin, &m->addr, &m->uuid,
-				     m->status, m->incarnation);
+				     m->status, m->incarnation,
+				     m->payload_size);
 		memcpy(pos + size, &member_bin, sizeof(member_bin));
+		memcpy(pos + payload_off, m->payload, m->payload_size);
 		size = new_size;
 		/*
 		 * First random member could be choosen too close
@@ -821,17 +873,27 @@ swim_encode_dissemination(struct swim *swim, struct swim_packet *packet)
 		int new_size = size + sizeof(event_bin);
 		if (m->old_uuid_ttl > 0)
 			new_size += sizeof(old_uuid_bin);
+		if (m->payload_ttl > 0) {
+			new_size += mp_sizeof_uint(SWIM_MEMBER_PAYLOAD) +
+				    mp_sizeof_bin(m->payload_size);
+		}
 		char *pos = swim_packet_reserve(packet, new_size);
 		if (pos == NULL)
 			break;
 		size = new_size;
 		swim_event_bin_fill(&event_bin, m->status, &m->addr, &m->uuid,
-				    m->incarnation, m->old_uuid_ttl);
+				    m->incarnation, m->old_uuid_ttl,
+				    m->payload_ttl);
 		memcpy(pos, &event_bin, sizeof(event_bin));
+		pos += sizeof(event_bin);
 		if (m->old_uuid_ttl > 0) {
-			pos += sizeof(event_bin);
 			swim_old_uuid_bin_fill(&old_uuid_bin, &m->old_uuid);
 			memcpy(pos, &old_uuid_bin, sizeof(old_uuid_bin));
+			pos += sizeof(old_uuid_bin);
+		}
+		if (m->payload_ttl > 0) {
+			pos = mp_encode_uint(pos, SWIM_MEMBER_PAYLOAD);
+			mp_encode_bin(pos, m->payload, m->payload_size);
 		}
 		++i;
 	}
@@ -881,6 +943,8 @@ swim_decrease_events_ttl(struct swim *swim)
 				 tmp) {
 		if (member->old_uuid_ttl > 0)
 			--member->old_uuid_ttl;
+		if (member->payload_ttl > 0)
+			--member->payload_ttl;
 		if (--member->status_ttl == 0) {
 			rlist_del_entry(member, in_queue_events);
 			cached_round_msg_invalidate(swim);
@@ -1107,7 +1171,9 @@ swim_update_member(struct swim *swim, const struct swim_member_def *def)
 		}
 		if (old_member == NULL) {
 			member = swim_new_member(swim, &def->addr, &def->uuid,
-						 def->status, def->incarnation);
+						 def->status, def->incarnation,
+						 def->payload,
+						 def->payload_size);
 		} else if (swim_update_member_uuid(swim, old_member,
 						   &def->uuid) == 0) {
 			member = old_member;
@@ -1121,6 +1187,15 @@ swim_update_member(struct swim *swim, const struct swim_member_def *def)
 		swim_update_member_addr(swim, member, &def->addr);
 		swim_update_member_status(swim, member, def->status,
 					  def->incarnation);
+		if (def->is_payload_specified &&
+		    swim_update_member_payload(swim, member, def->payload,
+					       def->payload_size) != 0) {
+			/*
+			 * Not such a critical error. Even for
+			 * that level.
+			 */
+			diag_log();
+		}
 		if (old_member != NULL) {
 			assert(member != old_member);
 			swim_delete_member(swim, old_member);
@@ -1380,7 +1455,7 @@ swim_cfg(struct swim *swim, const char *uri, double heartbeat_rate,
 			return -1;
 		}
 		swim->self = swim_new_member(swim, &addr, uuid, MEMBER_ALIVE,
-					     0);
+					     0, NULL, 0);
 		if (swim->self == NULL)
 			return -1;
 	} else if (uuid == NULL || tt_uuid_is_nil(uuid)) {
@@ -1445,6 +1520,18 @@ swim_is_configured(const struct swim *swim)
 }
 
 int
+swim_set_payload(struct swim *swim, const char *payload, int payload_size)
+{
+	if (payload_size > MAX_PAYLOAD_SIZE) {
+		diag_set(IllegalParams, "Payload should be <= %d",
+			 MAX_PAYLOAD_SIZE);
+		return -1;
+	}
+	return swim_update_member_payload(swim, swim->self, payload,
+					  payload_size);
+}
+
+int
 swim_add_member(struct swim *swim, const char *uri, const struct tt_uuid *uuid)
 {
 	const char *prefix = "swim.add_member:";
@@ -1458,7 +1545,8 @@ swim_add_member(struct swim *swim, const char *uri, const struct tt_uuid *uuid)
 		return -1;
 	struct swim_member *member = swim_find_member(swim, uuid);
 	if (member == NULL) {
-		member = swim_new_member(swim, &addr, uuid, MEMBER_ALIVE, 0);
+		member = swim_new_member(swim, &addr, uuid, MEMBER_ALIVE, 0,
+					 NULL, 0);
 		return member == NULL ? -1 : 0;
 	}
 	diag_set(SwimError, "%s a member with such UUID already exists",
@@ -1593,4 +1681,11 @@ const struct tt_uuid *
 swim_member_uuid(const struct swim_member *member)
 {
 	return &member->uuid;
+}
+
+const char *
+swim_member_payload(const struct swim_member *member, int *size)
+{
+	*size = member->payload_size;
+	return member->payload;
 }

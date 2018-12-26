@@ -75,6 +75,10 @@ int
 swim_cfg(struct swim *swim, const char *uri, double heartbeat_rate,
 	 double ack_timeout, const struct tt_uuid *uuid);
 
+/** Set payload to disseminate over the cluster. */
+int
+swim_set_payload(struct swim *swim, const char *payload, int payload_size);
+
 /**
  * Stop listening and broadcasting messages, cleanup all internal
  * structures, free memory.
@@ -140,6 +144,10 @@ swim_member_uri(const struct swim_member *member);
 /** Member's UUID. */
 const struct tt_uuid *
 swim_member_uuid(const struct swim_member *member);
+
+/** Member's payload. */
+const char *
+swim_member_payload(const struct swim_member *member, int *size);
 
 #if defined(__cplusplus)
 }
