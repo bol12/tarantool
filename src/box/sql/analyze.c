@@ -645,14 +645,14 @@ statGet(sql_context * context, int argc, sql_value ** argv)
 		/* Return the value to store in the "stat" column of the _sql_stat1
 		 * table for this index.
 		 *
-		 * The value is a string composed of a list of integers describing
+		 * The value is an array composed of a list of integers describing
 		 * the index. The first integer in the list is the total number of
 		 * entries in the index. There is one additional integer in the list
 		 * for each indexed column. This additional integer is an estimate of
 		 * the number of rows matched by a stabbing query on the index using
 		 * a key with the corresponding number of fields. In other words,
 		 * if the index is on columns (a,b) and the _sql_stat1 value is
-		 * "100 10 2", then sql estimates that:
+		 * [100, 10, 2], then sql estimates that:
 		 *
 		 *   * the index contains 100 rows,
 		 *   * "WHERE a=?" matches 10 rows, and
@@ -663,27 +663,32 @@ statGet(sql_context * context, int argc, sql_value ** argv)
 		 *
 		 *        I = (K+D-1)/D
 		 */
-		char *z;
-		int i;
-
-		char *zRet = sqlMallocZero((p->nKeyCol + 1) * 25);
-		if (zRet == 0) {
+		uint32_t size = mp_sizeof_array(p->nKeyCol + 1);
+		size += mp_sizeof_uint(p->nRow);
+		for (int i = 0; i < p->nKeyCol; ++i) {
+			uint64_t dist_count = p->current.anDLt[i] + 1;
+			uint64_t val = (p->nRow + dist_count - 1) / dist_count;
+			size += mp_sizeof_uint(val);
+		}
+		char *mp_stat1 = malloc(size);
+		if (mp_stat1 == NULL) {
 			sql_result_error_nomem(context);
 			return;
 		}
-
-		sql_snprintf(24, zRet, "%llu", (u64) p->nRow);
-		z = zRet + sqlStrlen30(zRet);
-		for (i = 0; i < p->nKeyCol; i++) {
-			u64 nDistinct = p->current.anDLt[i] + 1;
-			u64 iVal = (p->nRow + nDistinct - 1) / nDistinct;
-			sql_snprintf(24, z, " %llu", iVal);
-			z += sqlStrlen30(z);
-			assert(p->current.anEq[i]);
+		char *data = mp_stat1;
+		data = mp_encode_array(data, p->nKeyCol + 1);
+		data = mp_encode_uint(data, p->nRow);
+		for (int i = 0; i < p->nKeyCol; ++i) {
+			uint64_t dist_count = p->current.anDLt[i] + 1;
+			uint64_t val = (p->nRow + dist_count - 1) / dist_count;
+			data = mp_encode_uint(data, val);
+			assert(p->current.anEq[i] > 0);
 		}
-		assert(z[0] == '\0' && z > zRet);
+		assert(data == size + mp_stat1);
 
-		sql_result_text(context, zRet, -1, sql_free);
+		sql_result_blob(context, mp_stat1, size, free);
+		context->pOut->flags |= MEM_Subtype;
+		context->pOut->subtype = SQL_SUBTYPE_MSGPACK;
 	} else if (eCall == STAT_GET_KEY) {
 		if (p->iGet < 0) {
 			samplePushPrevious(p, 0);
@@ -710,24 +715,25 @@ statGet(sql_context * context, int argc, sql_value ** argv)
 			p->iGet++;
 			break;
 		}
-	}
-
-	char *zRet = sqlMallocZero(p->nCol * 25);
-	if (zRet == 0) {
-		sql_result_error_nomem(context);
-	} else {
-		int i;
-		char *z = zRet;
-		for (i = 0; i < p->nCol; i++) {
-			sql_snprintf(24, z, "%llu ", (u64) aCnt[i]);
-			z += sqlStrlen30(z);
 		}
-		assert(z[0] == '\0' && z > zRet);
-		z[-1] = '\0';
-		sql_result_text(context, zRet, -1, sql_free);
-	}
+		size_t size = mp_sizeof_array(p->nCol);
+		for (int i = 0; i < p->nCol; ++i)
+			size += mp_sizeof_uint(aCnt[i]);
 
-}
+		char *mp_stat4 = malloc(size);
+		if (mp_stat4 == NULL) {
+			sql_result_error_nomem(context);
+			return;
+		}
+		char *data = mp_stat4;
+		data = mp_encode_array(data, p->nCol);
+		for (int i = 0; i < p->nCol; i++)
+			data = mp_encode_uint(data, aCnt[i]);
+		assert(data == mp_stat4 + size);
+		sql_result_blob(context, mp_stat4, size, free);
+		context->pOut->flags |= MEM_Subtype;
+		context->pOut->subtype = SQL_SUBTYPE_MSGPACK;
+	}
 #ifndef SQL_DEBUG
 UNUSED_PARAMETER(argc);
 #endif
@@ -1168,34 +1174,67 @@ struct analysis_index_info {
 };
 
 /**
- * The first argument points to a nul-terminated string
- * containing a list of space separated integers. Load
- * the first stat_size of these into the output arrays.
+ * Tokens which may present at array containing statistics.
+ * They can turn on/off certain optimizations and help query
+ * planner. To be extended.
+ */
+enum {
+	UNORDERED_HINT_TK = 0x1,
+	NOSKIPSCAN_HINT_TK = 0x2,
+};
+
+/**
+ * The first argument points to a msgpack array
+ * containing a list of integers. Load the first
+ * stat_size of these into the output arrays.
  *
- * @param stat_string String containing array of integers.
- * @param stat_size Size of output arrays.
+ * @param stat_array MP_ARRAY containing array of integers.
+ * @param stat_size Size of input array (not counting the keywords).
  * @param[out] stat_exact Decoded array of statistics.
  * @param[out] stat_log Decoded array of stat logariphms.
+ * @param[out] keywords_info Bitmask of having keywords in the field.
  */
 static void
-decode_stat_string(const char *stat_string, int stat_size, tRowcnt *stat_exact,
-		   LogEst *stat_log) {
-	const char *z = stat_string;
-	if (z == NULL)
-		z = "";
-	for (int i = 0; *z && i < stat_size; i++) {
-		tRowcnt v = 0;
-		int c;
-		while ((c = z[0]) >= '0' && c <= '9') {
-			v = v * 10 + c - '0';
-			z++;
-		}
+decode_stat_array(const char *stat_array, int stat_size, tRowcnt *stat_exact,
+		  LogEst *stat_log, uint8_t *keywords_mask)
+{
+	const char *z = stat_array;
+	if (z == NULL || mp_typeof(*z) != MP_ARRAY)
+		return;
+	int array_size = mp_decode_array(&z);
+	/*
+	 * Number of entries in array should be greater or equal
+	 * to given size. If it greater, then it could contain
+	 * hint tokens to enable/disable certain optimizations.
+	 * But in case it is less, it is likely to be malformed
+	 * data, so it makes no sense to continue processing.
+	 */
+	if (array_size < stat_size)
+		return;
+	for (int i = 0; i < stat_size; i++) {
+		if (mp_typeof(*z) != MP_UINT)
+			return;
+		tRowcnt v = (tRowcnt) mp_decode_uint(&z);
 		if (stat_exact != NULL)
 			stat_exact[i] = v;
 		if (stat_log != NULL)
 			stat_log[i] = sqlLogEst(v);
-		if (*z == ' ')
-			z++;
+	}
+
+	/* Keywords processing if needed. */
+	if (keywords_mask != NULL) {
+		*keywords_mask = 0;
+		uint32_t keyword_count = array_size - stat_size;
+		while (keyword_count-- > 0) {
+			uint32_t sval_len;
+			if (mp_typeof(*z) != MP_STR)
+				return;
+			const char *sval = mp_decode_str(&z, &sval_len);
+			if (strncmp(sval, "unordered", 9) == 0)
+				*keywords_mask |= UNORDERED_HINT_TK;
+			else if (strncmp(sval, "noskipscan", 10) == 0)
+				*keywords_mask |= NOSKIPSCAN_HINT_TK;
+		}
 	}
 }
 
@@ -1270,23 +1309,11 @@ analysis_loader(void *data, int argc, char **argv, char **unused)
 		diag_set(OutOfMemory, stat1_size, "region", "tuple_log_est");
 		return -1;
 	}
-	decode_stat_string(argv[2], column_count, stat->tuple_stat1,
-			   stat->tuple_log_est);
-	stat->is_unordered = false;
-	stat->skip_scan_enabled = true;
-	char *z = argv[2];
-	/* Position ptr at the end of stat string. */
-	for (; *z == ' ' || (*z >= '0' && *z <= '9'); ++z);
-	while (z[0]) {
-		if (sql_strlike_cs("unordered%", z, '[') == 0)
-			index->def->opts.stat->is_unordered = true;
-		else if (sql_strlike_cs("noskipscan%", z, '[') == 0)
-			index->def->opts.stat->skip_scan_enabled = false;
-		while (z[0] != 0 && z[0] != ' ')
-			z++;
-		while (z[0] == ' ')
-			z++;
-	}
+	uint8_t keywords_mask = 0;
+	decode_stat_array(argv[2], column_count, stat->tuple_stat1,
+			  stat->tuple_log_est, &keywords_mask);
+	stat->is_unordered = (keywords_mask & UNORDERED_HINT_TK);
+	stat->skip_scan_enabled = ! (keywords_mask & NOSKIPSCAN_HINT_TK);
 	return 0;
 }
 
@@ -1489,12 +1516,13 @@ load_stat_from_space(struct sql *db, const char *sql_select_prepare,
 		struct index_stat *stat = &stats[current_idx_count];
 		struct index_sample *sample =
 			&stat->samples[stats[current_idx_count].sample_count];
-		decode_stat_string((char *)sql_column_text(stmt, 2),
-				   column_count, sample->eq, 0);
-		decode_stat_string((char *)sql_column_text(stmt, 3),
-				   column_count, sample->lt, 0);
-		decode_stat_string((char *)sql_column_text(stmt, 4),
-				   column_count, sample->dlt, 0);
+
+		decode_stat_array((char *)sql_column_text(stmt, 2),
+				  column_count, sample->eq, NULL, NULL);
+		decode_stat_array((char *)sql_column_text(stmt, 3),
+				  column_count, sample->lt, NULL, NULL);
+		decode_stat_array((char *)sql_column_text(stmt, 4),
+				  column_count, sample->dlt, NULL, NULL);
 		/* Take a copy of the sample. */
 		sample->key_size = sql_column_bytes(stmt, 5);
 		sample->sample_key = region_alloc(&fiber()->gc,

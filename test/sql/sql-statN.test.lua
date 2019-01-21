@@ -54,3 +54,27 @@ box.sql.execute("SELECT * FROM \"_sql_stat1\";")
 --Cleaning up.
 box.sql.execute("DROP TABLE t1;")
 box.sql.execute("DROP TABLE t2;")
+
+-- Check 'unordered' in "_sql_stat1".
+box.sql.execute("CREATE TABLE x1(a  INT PRIMARY KEY, b INT , UNIQUE(a, b))")
+box.sql.execute("INSERT INTO x1 VALUES(1, 2)")
+box.sql.execute("INSERT INTO x1 VALUES(3, 4)")
+box.sql.execute("INSERT INTO x1 VALUES(5, 6)")
+box.sql.execute("ANALYZE")
+box.sql.execute("SELECT * FROM x1")
+
+_sql_stat1 = box.space._sql_stat1
+
+function add_unordered_to_stat1() for _, tuple in _sql_stat1:pairs() do local temp_table = {} for _, v in pairs(tuple['stat']) do table.insert(temp_table, v) end table.insert(temp_table, 'unordered') _sql_stat1:update(tuple:transform(3, 3), {{'=', 3, temp_table}}) end end
+
+box.sql.execute("ANALYZE")
+add_unordered_to_stat1()
+
+box.sql.execute("SELECT * FROM \"_sql_stat1\"")
+
+test_run:cmd('restart server default');
+
+box.sql.execute("ANALYZE")
+box.sql.execute("SELECT * FROM x1")
+
+

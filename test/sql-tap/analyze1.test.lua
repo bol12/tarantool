@@ -1,6 +1,6 @@
 #!/usr/bin/env tarantool
 test = require("sqltester")
-test:plan(38)
+test:plan(39)
 
 --!./tcltestrunner.lua
 -- 2005 July 22
@@ -160,7 +160,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.1>
-        "T1", "2 1", "T1I1", "2 2", "T1I2", "2 1", "T1I3", "2 2 1"
+        "T1",2,1,"T1I1",2,2,"T1I2",2,1,"T1I3",2,2,1
         -- </analyze-3.1>
     })
 
@@ -173,7 +173,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.2>
-        "T1", "4 1", "T1I1", "4 4", "T1I2", "4 1", "T1I3", "4 4 1"
+        "T1",4,1,"T1I1",4,4,"T1I2",4,1,"T1I3",4,4,1
         -- </analyze-3.2>
     })
 
@@ -185,7 +185,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.3>
-        "T1","5 1", "T1I1", "5 3", "T1I2", "5 2", "T1I3", "5 3 1"
+        "T1",5,1,"T1I1",5,3,"T1I2",5,2,"T1I3",5,3,1
         -- </analyze-3.3>
     })
 
@@ -201,7 +201,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.4>
-        "T1","5 1","T1I1","5 3","T1I2","5 2","T1I3","5 3 1","T2","5 1","T2I1","5 3","T2I2","5 2","T2I3","5 3 1"
+        "T1",5,1,"T1I1",5,3,"T1I2",5,2,"T1I3",5,3,1,"T2",5,1,"T2I1",5,3,"T2I2",5,2,"T2I3",5,3,1
         -- </analyze-3.4>
     })
 
@@ -213,7 +213,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.5>
-        "T1","5 1","T1I1","5 3","T1I2","5 2","T1I3","5 3 1","T2","5 1","T2I1","5 3","T2I2","5 2"
+        "T1",5,1,"T1I1",5,3,"T1I2",5,2,"T1I3",5,3,1,"T2",5,1,"T2I1",5,3,"T2I2",5,2
         -- </analyze-3.5>
     })
 
@@ -224,7 +224,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.6>
-        "T1","5 1","T1I1","5 3","T1I2","5 2","T1I3","5 3 1","T2","5 1","T2I1","5 3","T2I2","5 2"
+        "T1",5,1,"T1I1",5,3,"T1I2",5,2,"T1I3",5,3,1,"T2",5,1,"T2I1",5,3,"T2I2",5,2
         -- </analyze-3.6>
     })
 
@@ -236,7 +236,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.7>
-        "T1","5 1","T1I1","5 3","T1I2","5 2","T1I3","5 3 1","T2","5 1","T2I1","5 3"
+        "T1",5,1,"T1I1",5,3,"T1I2",5,2,"T1I3",5,3,1,"T2",5,1,"T2I1",5,3
         -- </analyze-3.7>
     })
 
@@ -263,7 +263,7 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-3.9>
-        "T3","5 1","T3I1","5 3","T3I2","5 3 1 1 1","T3I3","5 5 2 1 1"
+        "T3",5,1,"T3I1",5,3,"T3I2",5,3,1,1,1,"T3I3",5,5,2,1,1
         -- </analyze-3.9>
     })
 
@@ -320,26 +320,37 @@ test:do_execsql_test(
         SELECT "idx", "stat" FROM "_sql_stat1" ORDER BY "idx";
     ]], {
         -- <analyze-4.0>
-        "T3", "5 1", "T3I1", "5 3", "T3I2", "5 3 1 1 1", "T3I3", "5 5 2 1 1", "T4", "5 1", "T4I1", "5 3", "T4I2", "5 2"
+        "T3",5,1,"T3I1",5,3,"T3I2",5,3,1,1,1,"T3I3",5,5,2,1,1,"T4",5,1,"T4I1",5,3,"T4I2",5,2
         -- </analyze-4.0>
     })
 
 test:do_execsql_test(
-    "analyze-4.1",
+    "analyze-4.1.1",
     [[
         DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1" VALUES('t4', 't4i1', 'nonsense');
-        INSERT INTO "_sql_stat1" VALUES('t4', 't4i2', '432653287412874653284129847632');
+    ]], {
+        -- <analyze-4.1>
+        -- </analyze-4.1>
+    })
+
+_sql_stat1 = box.space._sql_stat1
+_sql_stat1:insert{'t4', 't4i1', {'nonsense'}}
+_sql_stat1:insert{'t4', 't4i2', {432653287412874653284129847632}}
+
+test:do_execsql_test(
+    "analyze-4.1.2",
+    [[
         SELECT * FROM t4 WHERE x = 1234;
     ]], {
         -- <analyze-4.1>
         -- </analyze-4.1>
     })
 
+_sql_stat1:insert{'t4', 'xyzzy', {0, 1, 2, 3}}
+
 test:do_execsql_test(
     "analyze-4.2",
     [[
-        INSERT INTO "_sql_stat1" VALUES('t4', 'xyzzy', '0 1 2 3');
         SELECT * FROM t4 WHERE x = 1234;
     ]], {
         -- <analyze-4.2>
@@ -522,27 +533,83 @@ test:do_execsql_test(
             SELECT * FROM "_sql_stat1" where "tbl"='T1' and "idx"='I1' LIMIT 1;
     ]], {
     -- <analyze-6.1.2>
-    "T1", "I1", "221 221 221 221 2"
+    "T1","I1",221,221,221,221,2
     -- </analyze-6.1.2>
 })
+
+-- Show tuples in the "_sql_stat4" sorted by field "nlt"
+-- where fields "tbl" is "T1" and "idx" is "I1".
+function get_tuple_with_T1_I1_order_by_nlt(order)
+    _sql_stat4 = box.space._sql_stat4
+    t = {}
+    for k, v in _sql_stat4:pairs() do
+        table.insert(t, v)
+    end
+
+    local where = {tbl = "T1", idx = 'I1'}
+    -- Set all tuples in the t to nil if its field "tbl"
+    -- isn't "T1" and field "idx" isn't "I1".
+    for k, v in pairs(where) do
+        local i = 1
+        for _, tuple in pairs(t) do
+            tuple = t[i]
+            if tuple[k] ~= v then
+                t[i] = nil
+            end
+            i = i + 1
+        end
+    end
+
+    --Summarize all numbers in table that contains numbers only.
+    --Needed to compare stat fields.
+    local function sum_table(t)
+        local res = 0
+        for _, v in pairs(t) do
+            res = res + v
+        end
+        return res
+    end
+
+    local order_by = 'nlt'
+    local compare = function() end
+    if order == 'asc' then
+        compare = function(a, b)
+            if sum_table(a[order_by]) <= sum_table(b[order_by]) then
+                return true
+            end
+        end
+    else
+        compare = function(a, b)
+            if sum_table(a[order_by]) > sum_table(b[order_by]) then
+                return true
+            end
+        end
+    end
+
+    table.sort(t, compare)
+
+    return tostring(t[1])
+end
+
+box.internal.sql_create_function("get_tuple_with_T1_I1_order_by_nlt", "TEXT", get_tuple_with_T1_I1_order_by_nlt)
 
 test:do_execsql_test(
     "analyze-6.1.3",
     [[
-            SELECT "tbl", "idx", "neq", "nlt", "ndlt" FROM "_sql_stat4" where "tbl"='T1' and "idx"='I1' ORDER BY "nlt" LIMIT 1;
+            SELECT get_tuple_with_T1_I1_order_by_nlt('asc');
     ]], {
     -- <analyze-6.1.3>
-    "T1", "I1", "221 221 221 1", "0 0 0 10", "0 0 0 10"
+    "[\'T1\', \'I1\', [221, 221, 221, 1], [0, 0, 0, 10], [0, 0, 0, 10], !!binary lKF4oXmhego=]"
     -- </analyze-6.1.3>
 })
 
 test:do_execsql_test(
     "analyze-6.1.4",
     [[
-            SELECT "tbl", "idx", "neq", "nlt", "ndlt" FROM "_sql_stat4" where "tbl"='T1' and "idx"='I1' ORDER BY "nlt" DESC LIMIT 1;
+            SELECT get_tuple_with_T1_I1_order_by_nlt('desc');
     ]], {
     -- <analyze-6.1.4>
-    "T1", "I1", "221 221 221 1", "0 0 0 99", "0 0 0 99"
+    "[\'T1\', \'I1\', [221, 221, 221, 1], [0, 0, 0, 219], [0, 0, 0, 199], !!binary lKF4oXmheszH]"
     -- </analyze-6.1.4>
 })
 

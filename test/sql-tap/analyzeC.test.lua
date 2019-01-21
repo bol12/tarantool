@@ -4,6 +4,7 @@ test:plan(20)
 
 testprefix = "analyzeC"
 
+_sql_stat1 = box.space._sql_stat1
 
 --!./tcltestrunner.lua
 -- 2014-07-22
@@ -30,20 +31,25 @@ testprefix = "analyzeC"
 -- Baseline case.  Range queries work OK.  Indexes can be used for
 -- ORDER BY.
 
-test:do_execsql_test(
+test:do_test(
     1.0,
-    [[
-        DROP TABLE IF EXISTS t1;
-        CREATE TABLE t1(a  INT PRIMARY KEY, b INT , c INT , d INT );
-        INSERT INTO t1(a,b,c,d) VALUES(1,1,2,3),(2,7,8,9),(3,4,5,6),(4,10,11,12),(5,4,8,12),(6,1,11,111);
-        CREATE INDEX t1b ON t1(b);
-        CREATE INDEX t1c ON t1(c);
-        ANALYZE;
-        DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1"("tbl","idx","stat") VALUES('t1','t1b','12345 2'),('t1','t1c','12345 4');
-        ANALYZE;
-        SELECT b,c,d, '#' FROM t1 WHERE b BETWEEN 3 AND 8 ORDER BY d;
-    ]], {
+    function()
+        test:execsql([[
+            DROP TABLE IF EXISTS t1;
+            CREATE TABLE t1(a  INT PRIMARY KEY, b INT , c INT , d INT );
+            INSERT INTO t1(a,b,c,d) VALUES(1,1,2,3),(2,7,8,9),(3,4,5,6),(4,10,11,12),(5,4,8,12),(6,1,11,111);
+            CREATE INDEX t1b ON t1(b);
+            CREATE INDEX t1c ON t1(c);
+            ANALYZE;
+            DELETE FROM "_sql_stat1";
+        ]])
+        _sql_stat1:insert{'t1','t1b',{12345, 2}}
+        _sql_stat1:insert{'t1','t1c',{12345, 4}}
+        return test:execsql([[
+            ANALYZE;
+            SELECT b,c,d, '#' FROM t1 WHERE b BETWEEN 3 AND 8 ORDER BY d;
+            ]])
+    end, {
         -- <1.0>
         4, 5, 6, "#", 7, 8, 9, "#", 4, 8, 12, "#"
         -- </1.0>
@@ -173,20 +179,25 @@ test:do_execsql_test(
 
 -- The sz=NNN parameter determines which index to scan
 --
-test:do_execsql_test(
+test:do_test(
     4.0,
-    [[
-        DROP INDEX t1b ON t1;
-        CREATE INDEX t1bc ON t1(b,c);
-        CREATE INDEX t1db ON t1(d,b);
-        DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1"("tbl","idx","stat") VALUES('t1','t1bc','12345 3 2 sz=10'),('t1','t1db','12345 3 2 sz=20');
-        ANALYZE;
-        SELECT count(b) FROM t1;
-    ]], {
-        -- <4.0>
+    function()
+        test:execsql([[
+            DROP INDEX t1b ON t1;
+            CREATE INDEX t1bc ON t1(b,c);
+            CREATE INDEX t1db ON t1(d,b);
+            DELETE FROM "_sql_stat1";
+        ]])
+        _sql_stat1:insert{'t1','t1bc',{12345, 3, 2, 'sz=10'}}
+        _sql_stat1:insert{'t1','t1db',{12345, 3, 2, 'sz=20'}}
+        return test:execsql([[
+            ANALYZE;
+            SELECT count(b) FROM t1;
+        ]])
+    end, {
+        -- <4.2>
         6
-        -- </4.0>
+        -- </4.2>
     })
 
 test:do_execsql_test(
@@ -199,14 +210,19 @@ test:do_execsql_test(
         -- </4.1>
     })
 
-test:do_execsql_test(
+test:do_test(
     4.2,
-    [[
-        DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1"("tbl","idx","stat") VALUES('t1','t1bc','12345 3 2 sz=20'),('t1','t1db','12345 3 2 sz=10');
-        ANALYZE;
-        SELECT count(b) FROM t1;
-    ]], {
+    function()
+        test:execsql([[
+            DELETE FROM "_sql_stat1";
+        ]])
+        _sql_stat1:insert{'t1','t1bc',{12345, 3, 2, 'sz=20'}}
+        _sql_stat1:insert{'t1','t1db',{12345, 3, 2, 'sz=10'}}
+        return test:execsql([[
+            ANALYZE;
+            SELECT count(b) FROM t1;
+        ]])
+    end, {
         -- <4.2>
         6
         -- </4.2>
@@ -225,16 +241,19 @@ test:do_execsql_test(
 -- The sz=NNN parameter works even if there is other extraneous text
 -- in the sql_stat1.stat column.
 --
-test:do_execsql_test(
+test:do_test(
     5.0,
-    [[
-        DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1"("tbl","idx","stat")
-          VALUES('t1','t1bc','12345 3 2 x=5 sz=10 y=10'),
-                ('t1','t1db','12345 3 2 whatever sz=20 junk');
-        ANALYZE;
-        SELECT count(b) FROM t1;
-    ]], {
+    function()
+        test:execsql([[
+            DELETE FROM "_sql_stat1";
+        ]])
+        _sql_stat1:insert{'t1','t1bc',{12345, 3, 2, 'x=5', 'sz=10', 'y=10'}}
+        _sql_stat1:insert{'t1','t1db',{12345, 3, 2, 'whatever', 'sz=20', 'junk'}}
+        return test:execsql([[
+            ANALYZE;
+            SELECT count(b) FROM t1;
+        ]])
+    end, {
         -- <5.0>
         6
         -- </5.0>
@@ -251,17 +270,22 @@ test:do_execsql_test(
         -- </5.1>
     })
 
-test:do_execsql_test(
+test:do_test(
     5.2,
-    [[
-        DELETE FROM "_sql_stat1";
-        INSERT INTO "_sql_stat1"("tbl","idx","stat") VALUES('t1','t1db','12345 3 2 x=5 sz=10 y=10'), ('t1','t1bc','12345 3 2 whatever sz=20 junk');
-        ANALYZE;
-        SELECT count(b) FROM t1;
-    ]], {
-        -- <5.2>
+    function()
+        test:execsql([[
+            DELETE FROM "_sql_stat1";
+        ]])
+        _sql_stat1:insert{'t1','t1db',{12345, 3, 2, 'x=5', 'sz=10', 'y=10'}}
+        _sql_stat1:insert{'t1','t1bc',{12345, 3, 2, 'whatever', 'sz=20', 'junk'}}
+        return test:execsql([[
+            ANALYZE;
+            SELECT count(b) FROM t1;
+        ]])
+    end, {
+        -- <5.0>
         6
-        -- </5.2>
+        -- </5.0>
     })
 
 test:do_execsql_test(

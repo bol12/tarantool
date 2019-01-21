@@ -1,0 +1,182 @@
+test_run = require('test_run').new()
+---
+...
+engine = test_run:get_cfg('engine')
+---
+...
+box.sql.execute('pragma sql_default_engine=\''..engine..'\'')
+---
+...
+-- Initializing some things.
+box.sql.execute("CREATE TABLE t1(id INT PRIMARY KEY, a INT);")
+---
+...
+box.sql.execute("CREATE TABLE t2(id INT PRIMARY KEY, a INT);")
+---
+...
+box.sql.execute("CREATE INDEX i1 ON t1(a);")
+---
+...
+box.sql.execute("CREATE INDEX i1 ON t2(a);")
+---
+...
+box.sql.execute("INSERT INTO t1 VALUES(1, 2);")
+---
+...
+box.sql.execute("INSERT INTO t2 VALUES(1, 2);")
+---
+...
+-- Analyze.
+box.sql.execute("ANALYZE;")
+---
+...
+-- Checking the data.
+box.sql.execute("SELECT * FROM \"_sql_stat4\";")
+---
+- - ['T1', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T1', 'T1', [1], [0], [0], !!binary kQE=]
+  - ['T2', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T2', 'T2', [1], [0], [0], !!binary kQE=]
+...
+box.sql.execute("SELECT * FROM \"_sql_stat1\";")
+---
+- - ['T1', 'I1', [1, 1]]
+  - ['T1', 'T1', [1, 1]]
+  - ['T2', 'I1', [1, 1]]
+  - ['T2', 'T2', [1, 1]]
+...
+-- Dropping an index.
+box.sql.execute("DROP INDEX i1 ON t1;")
+---
+...
+-- Checking the DROP INDEX results.
+box.sql.execute("SELECT * FROM \"_sql_stat4\";")
+---
+- - ['T1', 'T1', [1], [0], [0], !!binary kQE=]
+  - ['T2', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T2', 'T2', [1], [0], [0], !!binary kQE=]
+...
+box.sql.execute("SELECT * FROM \"_sql_stat1\";")
+---
+- - ['T1', 'T1', [1, 1]]
+  - ['T2', 'I1', [1, 1]]
+  - ['T2', 'T2', [1, 1]]
+...
+--Cleaning up.
+box.sql.execute("DROP TABLE t1;")
+---
+...
+box.sql.execute("DROP TABLE t2;")
+---
+...
+-- Same test but dropping an INDEX ON t2.
+box.sql.execute("CREATE TABLE t1(id INT PRIMARY KEY, a INT);")
+---
+...
+box.sql.execute("CREATE TABLE t2(id INT PRIMARY KEY, a INT);")
+---
+...
+box.sql.execute("CREATE INDEX i1 ON t1(a);")
+---
+...
+box.sql.execute("CREATE INDEX i1 ON t2(a);")
+---
+...
+box.sql.execute("INSERT INTO t1 VALUES(1, 2);")
+---
+...
+box.sql.execute("INSERT INTO t2 VALUES(1, 2);")
+---
+...
+-- Analyze.
+box.sql.execute("ANALYZE;")
+---
+...
+-- Checking the data.
+box.sql.execute("SELECT * FROM \"_sql_stat4\";")
+---
+- - ['T1', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T1', 'T1', [1], [0], [0], !!binary kQE=]
+  - ['T2', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T2', 'T2', [1], [0], [0], !!binary kQE=]
+...
+box.sql.execute("SELECT * FROM \"_sql_stat1\";")
+---
+- - ['T1', 'I1', [1, 1]]
+  - ['T1', 'T1', [1, 1]]
+  - ['T2', 'I1', [1, 1]]
+  - ['T2', 'T2', [1, 1]]
+...
+-- Dropping an index.
+box.sql.execute("DROP INDEX i1 ON t2;")
+---
+...
+-- Checking the DROP INDEX results.
+box.sql.execute("SELECT * FROM \"_sql_stat4\";")
+---
+- - ['T1', 'I1', [1], [0], [0], !!binary kQI=]
+  - ['T1', 'T1', [1], [0], [0], !!binary kQE=]
+  - ['T2', 'T2', [1], [0], [0], !!binary kQE=]
+...
+box.sql.execute("SELECT * FROM \"_sql_stat1\";")
+---
+- - ['T1', 'I1', [1, 1]]
+  - ['T1', 'T1', [1, 1]]
+  - ['T2', 'T2', [1, 1]]
+...
+--Cleaning up.
+box.sql.execute("DROP TABLE t1;")
+---
+...
+box.sql.execute("DROP TABLE t2;")
+---
+...
+-- Check 'unordered' in "_sql_stat1".
+box.sql.execute("CREATE TABLE x1(a  INT PRIMARY KEY, b INT , UNIQUE(a, b))")
+---
+...
+box.sql.execute("INSERT INTO x1 VALUES(1, 2)")
+---
+...
+box.sql.execute("INSERT INTO x1 VALUES(3, 4)")
+---
+...
+box.sql.execute("INSERT INTO x1 VALUES(5, 6)")
+---
+...
+box.sql.execute("ANALYZE")
+---
+...
+box.sql.execute("SELECT * FROM x1")
+---
+- - [1, 2]
+  - [3, 4]
+  - [5, 6]
+...
+_sql_stat1 = box.space._sql_stat1
+---
+...
+function add_unordered_to_stat1() for _, tuple in _sql_stat1:pairs() do local temp_table = {} for _, v in pairs(tuple['stat']) do table.insert(temp_table, v) end table.insert(temp_table, 'unordered') _sql_stat1:update(tuple:transform(3, 3), {{'=', 3, temp_table}}) end end
+---
+...
+box.sql.execute("ANALYZE")
+---
+...
+add_unordered_to_stat1()
+---
+...
+box.sql.execute("SELECT * FROM \"_sql_stat1\"")
+---
+- - ['X1', 'X1', [3, 1, 'unordered']]
+  - ['X1', 'unique_unnamed_X1_2', [3, 1, 1, 'unordered']]
+...
+test_run:cmd('restart server default');
+box.sql.execute("ANALYZE")
+---
+...
+box.sql.execute("SELECT * FROM x1")
+---
+- - [1, 2]
+  - [3, 4]
+  - [5, 6]
+...
