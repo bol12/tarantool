@@ -142,6 +142,10 @@ struct txn {
 	struct stailq stmts;
 	/** Total number of WAL rows in this txn. */
 	int n_rows;
+	/** True if the txn has rows with an assigned lsn. */
+	bool has_rows_with_lsn;
+	/** True if the txn has rows without a lsn. */
+	bool has_rows_without_lsn;
 	/**
 	 * True if this transaction is running in autocommit mode
 	 * (statement end causes an automatic transaction commit).

@@ -141,6 +141,8 @@ txn_begin(bool is_autocommit)
 	/* Initialize members explicitly to save time on memset() */
 	stailq_create(&txn->stmts);
 	txn->n_rows = 0;
+	txn->has_rows_with_lsn = false;
+	txn->has_rows_without_lsn = false;
 	txn->is_autocommit = is_autocommit;
 	txn->has_triggers  = false;
 	txn->is_aborted = false;
@@ -233,6 +235,8 @@ txn_commit_stmt(struct txn *txn, struct request *request)
 	if (stmt->space == NULL || !space_is_temporary(stmt->space)) {
 		if (txn_add_redo(stmt, request) != 0)
 			goto fail;
+		txn->has_rows_with_lsn |= stmt->row->replica_id != 0;
+		txn->has_rows_without_lsn |= stmt->row->replica_id == 0;
 		++txn->n_rows;
 	}
 	/*
@@ -272,13 +276,29 @@ txn_write_to_wal(struct txn *txn)
 
 	struct txn_stmt *stmt;
 	struct xrow_header **row = req->rows;
-	stailq_foreach_entry(stmt, &txn->stmts, next) {
-		if (stmt->row == NULL)
-			continue; /* A read (e.g. select) request */
-		*row++ = stmt->row;
-		req->approx_len += xrow_approx_len(stmt->row);
+	if (txn->has_rows_with_lsn) {
+		/* Write out rows that already have an assigned lsn. */
+		stailq_foreach_entry(stmt, &txn->stmts, next) {
+			if (stmt->row == NULL)
+				continue; /* A read (e.g. select) request */
+			if (stmt->row->replica_id == 0)
+				continue; /* A row without lsn. */
+			*row++ = stmt->row;
+			req->approx_len += xrow_approx_len(stmt->row);
+		}
 	}
-	assert(row == req->rows + req->n_rows);
+	if (txn->has_rows_without_lsn) {
+		/* Write out rows to assign a lsn. */
+		stailq_foreach_entry(stmt, &txn->stmts, next) {
+			if (stmt->row == NULL)
+				continue; /* A read (e.g. select) request */
+			if (stmt->row->replica_id != 0)
+				continue; /* A row with lsn. */
+			*row++ = stmt->row;
+			req->approx_len += xrow_approx_len(stmt->row);
+		}
+	}
+	assert(row == req->rows + txn->n_rows);
 
 	ev_tstamp start = ev_monotonic_now(loop());
 	int64_t res = journal_write(req);
@@ -399,8 +419,6 @@ txn_rollback()
 		txn_stmt_unref_tuples(stmt);
 
 	TRASH(txn);
-	/** Free volatile txn memory. */
-	fiber_gc();
 	fiber_set_txn(fiber(), NULL);
 }
 
@@ -480,6 +498,8 @@ box_txn_rollback()
 		return -1;
 	}
 	txn_rollback(); /* doesn't throw */
+	/** Free volatile txn memory. */
+	fiber_gc();
 	return 0;
 }
 
