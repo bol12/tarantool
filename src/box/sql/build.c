@@ -232,30 +232,18 @@ sql_space_column_is_in_pk(struct space *space, uint32_t column)
 	return false;
 }
 
-/*
- * Given a token, return a string that consists of the text of that
- * token.  Space to hold the returned string
- * is obtained from sqlMalloc() and must be freed by the calling
- * function.
- *
- * Any quotation marks (ex:  "name", 'name', [name], or `name`) that
- * surround the body of the token are removed.
- *
- * Tokens are often just pointers into the original SQL text and so
- * are not \000 terminated and are not persistent.  The returned string
- * is \000 terminated and is persistent.
- */
 char *
-sqlNameFromToken(sql * db, Token * pName)
+sql_name_from_token(struct sql *db, struct Token *name_token)
 {
-	char *zName;
-	if (pName) {
-		zName = sqlDbStrNDup(db, (char *)pName->z, pName->n);
-		sqlNormalizeName(zName);
-	} else {
-		zName = 0;
+	assert(name_token != NULL && name_token->z != NULL);
+	char *name = sqlDbStrNDup(db, (char *)name_token->z, name_token->n);
+	if (name == NULL) {
+		diag_set(OutOfMemory, name_token->n + 1, "sqlDbStrNDup",
+			 "name");
+		return NULL;
 	}
-	return zName;
+	sqlNormalizeName(name);
+	return name;
 }
 
 /*
@@ -332,7 +320,10 @@ sqlStartTable(Parse *pParse, Token *pName, int noErr)
 		goto cleanup;
 	sqlVdbeCountChanges(v);
 
-	zName = sqlNameFromToken(db, pName);
+	assert(pName != NULL);
+	zName = sql_name_from_token(db, pName);
+	if (zName == NULL)
+		goto tnt_error;
 
 	pParse->sNameToken = *pName;
 	if (zName == 0)
@@ -344,10 +335,9 @@ sqlStartTable(Parse *pParse, Token *pName, int noErr)
 	if (space != NULL) {
 		if (!noErr) {
 			diag_set(ClientError, ER_SPACE_EXISTS, zName);
-			sql_parser_error(pParse);
-		} else {
-			assert(!db->init.busy || CORRUPT_DB);
+			goto tnt_error;
 		}
+		assert(!db->init.busy || CORRUPT_DB);
 		goto cleanup;
 	}
 
@@ -367,6 +357,9 @@ sqlStartTable(Parse *pParse, Token *pName, int noErr)
  cleanup:
 	sqlDbFree(db, zName);
 	return;
+tnt_error:
+	sql_parser_error(pParse);
+	goto cleanup;
 }
 
 /**
@@ -708,11 +701,13 @@ sqlAddCollateType(Parse * pParse, Token * pToken)
 	struct space *space = pParse->new_space;
 	uint32_t i = space->def->field_count - 1;
 	sql *db = pParse->db;
-	char *zColl = sqlNameFromToken(db, pToken);
-	if (!zColl)
+	char *coll_name = sql_name_from_token(db, pToken);
+	if (coll_name == NULL) {
+		sql_parser_error(pParse);
 		return;
+	}
 	uint32_t *coll_id = &space->def->fields[i].coll_id;
-	if (sql_get_coll_seq(pParse, zColl, coll_id) != NULL) {
+	if (sql_get_coll_seq(pParse, coll_name, coll_id) != NULL) {
 		/* If the column is declared as "<name> PRIMARY KEY COLLATE <type>",
 		 * then an index may have been created on this column before the
 		 * collation type was added. Correct this if it is the case.
@@ -726,7 +721,7 @@ sqlAddCollateType(Parse * pParse, Token * pToken)
 			}
 		}
 	}
-	sqlDbFree(db, zColl);
+	sqlDbFree(db, coll_name);
 }
 
 struct coll *
@@ -1750,9 +1745,9 @@ sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
 		rlist_add_entry(&parse_context->new_fk_constraint, fk_parse, link);
 	}
 	assert(parent != NULL);
-	parent_name = sqlNameFromToken(db, parent);
+	parent_name = sql_name_from_token(db, parent);
 	if (parent_name == NULL)
-		goto exit_create_fk;
+		goto tnt_error;
 	/*
 	 * Within ALTER TABLE ADD CONSTRAINT FK also can be
 	 * self-referenced, but in this case parent (which is
@@ -1785,15 +1780,20 @@ sql_create_foreign_key(struct Parse *parse_context, struct SrcList *child,
 				sqlMPrintf(db, "FK_CONSTRAINT_%d_%s",
 					       ++parse_context->fk_constraint_count,
 					       space->def->name);
+			if (constraint_name == NULL)
+				goto exit_create_fk;
 		} else {
 			struct Token *cnstr_nm = &parse_context->constraintName;
-			constraint_name = sqlNameFromToken(db, cnstr_nm);
+			constraint_name = sql_name_from_token(db, cnstr_nm);
+			if (constraint_name == NULL)
+				goto tnt_error;
 		}
 	} else {
-		constraint_name = sqlNameFromToken(db, constraint);
+		assert(constraint != NULL);
+		constraint_name = sql_name_from_token(db, constraint);
+		if (constraint_name == NULL)
+			goto tnt_error;
 	}
-	if (constraint_name == NULL)
-		goto exit_create_fk;
 	const char *error_msg = "number of columns in foreign key does not "
 				"match the number of columns in the primary "
 				"index of referenced table";
@@ -1922,15 +1922,18 @@ sql_drop_foreign_key(struct Parse *parse_context, struct SrcList *table,
 	struct space *child = space_by_name(table_name);
 	if (child == NULL) {
 		diag_set(ClientError, ER_NO_SUCH_SPACE, table_name);
-		parse_context->rc = SQL_TARANTOOL_ERROR;
-		parse_context->nErr++;
+		sql_parser_error(parse_context);
 		return;
 	}
-	char *constraint_name = sqlNameFromToken(parse_context->db,
-						     constraint);
-	if (constraint_name != NULL)
-		vdbe_emit_fk_constraint_drop(parse_context, constraint_name,
-				    child->def->id);
+	assert(constraint != NULL);
+	char *constraint_name =
+		sql_name_from_token(parse_context->db, constraint);
+	if (constraint_name == NULL) {
+		sql_parser_error(parse_context);
+		return;
+	}
+	vdbe_emit_fk_constraint_drop(parse_context, constraint_name,
+				     child->def->id);
 	/*
 	 * We account changes to row count only if drop of
 	 * foreign keys take place in a separate
@@ -2192,9 +2195,9 @@ sql_create_index(struct Parse *parse, struct Token *token,
 	 */
 	if (token != NULL) {
 		assert(token->z != NULL);
-		name = sqlNameFromToken(db, token);
+		name = sql_name_from_token(db, token);
 		if (name == NULL)
-			goto exit_create_index;
+			goto tnt_error;
 		if (sql_space_index_by_name(space, name) != NULL) {
 			if (!if_not_exist) {
 				diag_set(ClientError, ER_INDEX_EXISTS_IN_SPACE,
@@ -2205,10 +2208,13 @@ sql_create_index(struct Parse *parse, struct Token *token,
 		}
 	} else {
 		char *constraint_name = NULL;
-		if (parse->constraintName.z != NULL)
+		if (parse->constraintName.z != NULL) {
 			constraint_name =
-				sqlNameFromToken(db,
-						     &parse->constraintName);
+				sql_name_from_token(db,
+						    &parse->constraintName);
+			if (constraint_name == NULL)
+				goto tnt_error;
+		}
 
 	       /*
 		* This naming is temporary. Now it's not
@@ -2246,9 +2252,7 @@ sql_create_index(struct Parse *parse, struct Token *token,
 	if (tbl_name != NULL && space_is_system(space)) {
 		diag_set(ClientError, ER_MODIFY_INDEX, name, def->name,
 			 "can't create index on system space");
-		parse->nErr++;
-		parse->rc = SQL_TARANTOOL_ERROR;
-		goto exit_create_index;
+		goto tnt_error;
 	}
 
 	/*
@@ -2275,9 +2279,7 @@ sql_create_index(struct Parse *parse, struct Token *token,
 	index = (struct index *) region_alloc(&parse->region, sizeof(*index));
 	if (index == NULL) {
 		diag_set(OutOfMemory, sizeof(*index), "region", "index");
-		parse->rc = SQL_TARANTOOL_ERROR;
-		parse->nErr++;
-		goto exit_create_index;
+		goto tnt_error;
 	}
 	memset(index, 0, sizeof(*index));
 
@@ -2436,6 +2438,10 @@ sql_create_index(struct Parse *parse, struct Token *token,
 	sql_expr_list_delete(db, col_list);
 	sqlSrcListDelete(db, tbl_name);
 	sqlDbFree(db, name);
+	return;
+tnt_error:
+	sql_parser_error(parse);
+	goto exit_create_index;
 }
 
 void
@@ -2448,31 +2454,28 @@ sql_drop_index(struct Parse *parse_context, struct SrcList *index_name_list,
 	/* Never called with prior errors. */
 	assert(parse_context->nErr == 0);
 	assert(table_token != NULL);
-	const char *table_name = sqlNameFromToken(db, table_token);
-	if (db->mallocFailed) {
-		goto exit_drop_index;
-	}
+	const char *table_name = sql_name_from_token(db, table_token);
+	if (table_name == NULL)
+		goto tnt_error;
 	sqlVdbeCountChanges(v);
 	assert(index_name_list->nSrc == 1);
 	assert(table_token->n > 0);
 	struct space *space = space_by_name(table_name);
 	if (space == NULL) {
-		if (!if_exists) {
-			diag_set(ClientError, ER_NO_SUCH_SPACE, table_name);
-			sql_parser_error(parse_context);
-		}
-		goto exit_drop_index;
+		if (if_exists)
+			goto exit_drop_index;
+		diag_set(ClientError, ER_NO_SUCH_SPACE, table_name);
+		goto tnt_error;
 	}
 	const char *index_name = index_name_list->a[0].zName;
 	uint32_t index_id = box_index_id_by_name(space->def->id, index_name,
 						 strlen(index_name));
 	if (index_id == BOX_ID_NIL) {
-		if (!if_exists) {
-			diag_set(ClientError, ER_NO_SUCH_INDEX_NAME,
-				 index_name, table_name);
-			sql_parser_error(parse_context);
-		}
-		goto exit_drop_index;
+		if (if_exists)
+			goto exit_drop_index;
+		diag_set(ClientError, ER_NO_SUCH_INDEX_NAME, index_name,
+			 table_name);
+		goto tnt_error;
 	}
 	struct index *index = space_index(space, index_id);
 	assert(index != NULL);
@@ -2493,6 +2496,10 @@ sql_drop_index(struct Parse *parse_context, struct SrcList *index_name_list,
  exit_drop_index:
 	sqlSrcListDelete(db, index_name_list);
 	sqlDbFree(db, (void *) table_name);
+	return;
+tnt_error:
+	sql_parser_error(parse_context);
+	goto exit_drop_index;
 }
 
 /*
@@ -2538,30 +2545,28 @@ sqlArrayAllocate(sql * db,	/* Connection to notify of malloc failures */
 	return pArray;
 }
 
-/*
- * Append a new element to the given IdList.  Create a new IdList if
- * need be.
- *
- * A new IdList is returned, or NULL if malloc() fails.
- */
-IdList *
-sqlIdListAppend(sql * db, IdList * pList, Token * pToken)
+struct IdList *
+sql_id_list_append(struct sql *db, struct IdList *list,
+		   struct Token *name_token)
 {
+	if (list == NULL &&
+	    (list = sqlDbMallocZero(db, sizeof(IdList))) == NULL) {
+		diag_set(OutOfMemory, sizeof(IdList), "sqlDbMallocZero",
+			 "list");
+		return NULL;
+	}
 	int i;
-	if (pList == 0) {
-		pList = sqlDbMallocZero(db, sizeof(IdList));
-		if (pList == 0)
-			return 0;
-	}
-	pList->a = sqlArrayAllocate(db,
-					pList->a,
-					sizeof(pList->a[0]), &pList->nId, &i);
-	if (i < 0) {
-		sqlIdListDelete(db, pList);
-		return 0;
-	}
-	pList->a[i].zName = sqlNameFromToken(db, pToken);
-	return pList;
+	list->a = sqlArrayAllocate(db, list->a, sizeof(list->a[0]),
+				   &list->nId, &i);
+	if (i < 0)
+		goto error;
+	list->a[i].zName = sql_name_from_token(db, name_token);
+	if (list->a[i].zName == NULL)
+		goto error;
+	return list;
+error:
+	sqlIdListDelete(db, list);
+	return NULL;
 }
 
 /*
@@ -2671,7 +2676,11 @@ sql_src_list_append(struct sql *db, struct SrcList *list,
 		list = new_list;
 	}
 	pItem = &list->a[list->nSrc - 1];
-	pItem->zName = sqlNameFromToken(db, name_token);
+	if (name_token != NULL) {
+		pItem->zName = sql_name_from_token(db, name_token);
+		if (pItem->zName == NULL)
+			goto error;
+	}
 	return list;
 error:
 	sqlSrcListDelete(db, list);
@@ -2773,8 +2782,10 @@ sqlSrcListAppendFromTerm(Parse * pParse,	/* Parsing context */
 	assert(p->nSrc != 0);
 	pItem = &p->a[p->nSrc - 1];
 	assert(pAlias != 0);
-	if (pAlias->n) {
-		pItem->zAlias = sqlNameFromToken(db, pAlias);
+	if (pAlias->n != 0) {
+		pItem->zAlias = sql_name_from_token(db, pAlias);
+		if (pItem->zAlias == NULL)
+			goto tnt_error;
 	}
 	pItem->pSelect = pSubquery;
 	pItem->pOn = pOn;
@@ -2811,8 +2822,15 @@ sqlSrcListIndexedBy(Parse * pParse, SrcList * p, Token * pIndexedBy)
 			 */
 			pItem->fg.notIndexed = 1;
 		} else {
-			pItem->u1.zIndexedBy =
-			    sqlNameFromToken(pParse->db, pIndexedBy);
+			if (pIndexedBy->z != NULL) {
+				pItem->u1.zIndexedBy =
+					sql_name_from_token(pParse->db,
+							    pIndexedBy);
+				if (pItem->u1.zIndexedBy == NULL) {
+					sql_parser_error(pParse);
+					return;
+				}
+			}
 			pItem->fg.isIndexedBy = (pItem->u1.zIndexedBy != 0);
 		}
 	}
@@ -2898,11 +2916,12 @@ sql_transaction_rollback(Parse *pParse)
 void
 sqlSavepoint(Parse * pParse, int op, Token * pName)
 {
-	char *zName = sqlNameFromToken(pParse->db, pName);
+	struct sql *db = pParse->db;
+	char *zName = sql_name_from_token(db, pName);
 	if (zName) {
 		Vdbe *v = sqlGetVdbe(pParse);
 		if (!v) {
-			sqlDbFree(pParse->db, zName);
+			sqlDbFree(db, zName);
 			return;
 		}
 		if (op == SAVEPOINT_BEGIN &&
@@ -2912,6 +2931,8 @@ sqlSavepoint(Parse * pParse, int op, Token * pName)
 			return;
 		}
 		sqlVdbeAddOp4(v, OP_Savepoint, op, 0, 0, zName, P4_DYNAMIC);
+	} else {
+		sql_parser_error(pParse);
 	}
 }
 
@@ -2987,19 +3008,23 @@ sqlWithAdd(Parse * pParse,	/* Parsing context */
 {
 	sql *db = pParse->db;
 	With *pNew;
-	char *zName;
 
-	/* Check that the CTE name is unique within this WITH clause. If
-	 * not, store an error in the Parse structure.
+	/*
+	 * Check that the CTE name is unique within this WITH
+	 * clause. If not, store an error in the Parse structure.
 	 */
-	zName = sqlNameFromToken(pParse->db, pName);
-	if (zName && pWith) {
+	char *name = sql_name_from_token(db, pName);
+	if (name == NULL) {
+		sql_parser_error(pParse);
+		return NULL;
+	}
+	if (pWith != NULL) {
 		int i;
 		for (i = 0; i < pWith->nCte; i++) {
-			if (strcmp(zName, pWith->a[i].zName) == 0) {
+			if (strcmp(name, pWith->a[i].zName) == 0) {
 				sqlErrorMsg(pParse,
-						"duplicate WITH table name: %s",
-						zName);
+					    "duplicate WITH table name: %s",
+					    name);
 			}
 		}
 	}
@@ -3011,17 +3036,17 @@ sqlWithAdd(Parse * pParse,	/* Parsing context */
 	} else {
 		pNew = sqlDbMallocZero(db, sizeof(*pWith));
 	}
-	assert((pNew != 0 && zName != 0) || db->mallocFailed);
+	assert((pNew != NULL && name != NULL) || db->mallocFailed);
 
 	if (db->mallocFailed) {
 		sql_expr_list_delete(db, pArglist);
 		sql_select_delete(db, pQuery);
-		sqlDbFree(db, zName);
+		sqlDbFree(db, name);
 		pNew = pWith;
 	} else {
 		pNew->a[pNew->nCte].pSelect = pQuery;
 		pNew->a[pNew->nCte].pCols = pArglist;
-		pNew->a[pNew->nCte].zName = zName;
+		pNew->a[pNew->nCte].zName = name;
 		pNew->a[pNew->nCte].zCteErr = 0;
 		pNew->nCte++;
 	}

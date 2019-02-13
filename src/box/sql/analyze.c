@@ -1111,34 +1111,39 @@ vdbe_emit_analyze_table(struct Parse *parse, struct space *space)
 void
 sqlAnalyze(Parse * pParse, Token * pName)
 {
-	sql *db = pParse->db;
+	char *name = NULL;
+	struct sql *db = pParse->db;
+	struct Vdbe *v = sqlGetVdbe(pParse);
+	if (v == NULL)
+		return;
 	if (pName == NULL) {
 		/* Form 1:  Analyze everything */
 		sql_analyze_database(pParse);
 	} else {
 		/* Form 2:  Analyze table named */
-		char *z = sqlNameFromToken(db, pName);
-		if (z != NULL) {
-			struct space *sp = space_by_name(z);
-			if (sp != NULL) {
-				if (sp->def->opts.is_view) {
-					sqlErrorMsg(pParse, "VIEW isn't "\
-							"allowed to be "\
-							"analyzed");
-				} else {
-					vdbe_emit_analyze_table(pParse, sp);
-				}
-			} else {
-				diag_set(ClientError, ER_NO_SUCH_SPACE, z);
-				pParse->rc = SQL_TARANTOOL_ERROR;
-				pParse->nErr++;
-			}
-			sqlDbFree(db, z);
+		name = sql_name_from_token(db, pName);
+		if (name == NULL)
+			goto tnt_error;
+		struct space *sp = space_by_name(name);
+		if (sp == NULL) {
+			diag_set(ClientError, ER_NO_SUCH_SPACE, name);
+			goto tnt_error;
+		}
+		if (sp->def->opts.is_view) {
+			sqlErrorMsg(pParse,
+				    "VIEW isn't allowed to be analyzed");
+			goto cleanup;
+		} else {
+			vdbe_emit_analyze_table(pParse, sp);
 		}
 	}
-	Vdbe *v = sqlGetVdbe(pParse);
-	if (v != NULL)
-		sqlVdbeAddOp0(v, OP_Expire);
+	sqlVdbeAddOp0(v, OP_Expire);
+cleanup:
+	sqlDbFree(db, name);
+	return;
+tnt_error:
+	sql_parser_error(pParse);
+	goto cleanup;
 }
 
 ssize_t
