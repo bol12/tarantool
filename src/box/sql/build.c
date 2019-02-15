@@ -236,13 +236,20 @@ char *
 sql_name_from_token(struct sql *db, struct Token *name_token)
 {
 	assert(name_token != NULL && name_token->z != NULL);
-	char *name = sqlDbStrNDup(db, (char *)name_token->z, name_token->n);
+	int name_len =
+		sql_normalize_name(NULL, 0, name_token->z, name_token->n);
+	if (name_len < 0)
+		return NULL;
+	char *name = sqlDbMallocRawNN(db, name_len + 1);
 	if (name == NULL) {
-		diag_set(OutOfMemory, name_token->n + 1, "sqlDbStrNDup",
-			 "name");
+		diag_set(OutOfMemory, name_len + 1, "sqlDbMallocRawNN", "name");
 		return NULL;
 	}
-	sqlNormalizeName(name);
+	if (sql_normalize_name(name, name_len + 1, name_token->z,
+			       name_token->n) < 0) {
+		sqlDbFree(db, name);
+		return NULL;
+	}
 	return name;
 }
 
@@ -441,17 +448,16 @@ sqlAddColumn(Parse * pParse, Token * pName, struct type_def *type_def)
 	if (sql_field_retrieve(pParse, def, def->field_count) == NULL)
 		return;
 	struct region *region = &pParse->region;
-	z = region_alloc(region, pName->n + 1);
+	int name_len = sql_normalize_name(NULL, 0, pName->z, pName->n);
+	if (name_len < 0)
+		goto tarantool_error;
+	z = region_alloc(region, name_len + 1);
 	if (z == NULL) {
-		diag_set(OutOfMemory, pName->n + 1,
-			 "region_alloc", "z");
-		pParse->rc = SQL_TARANTOOL_ERROR;
-		pParse->nErr++;
-		return;
+		diag_set(OutOfMemory, name_len + 1, "region_alloc", "z");
+		goto tarantool_error;
 	}
-	memcpy(z, pName->z, pName->n);
-	z[pName->n] = 0;
-	sqlNormalizeName(z);
+	if (sql_normalize_name(z, name_len + 1, pName->z, pName->n) < 0)
+		goto tarantool_error;
 	for (uint32_t i = 0; i < def->field_count; i++) {
 		if (strcmp(z, def->fields[i].name) == 0) {
 			diag_set(ClientError, ER_SPACE_FIELD_IS_DUPLICATE, z);
@@ -472,6 +478,10 @@ sqlAddColumn(Parse * pParse, Token * pName, struct type_def *type_def)
 	column_def->type = type_def->type;
 	def->field_count++;
 	pParse->constraintName.n = 0;
+	return;
+tarantool_error:
+	pParse->rc = SQL_TARANTOOL_ERROR;
+	pParse->nErr++;
 }
 
 void
