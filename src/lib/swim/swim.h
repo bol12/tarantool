@@ -105,6 +105,14 @@ swim_probe_member(struct swim *swim, const char *uri);
 void
 swim_info(struct swim *swim, struct info_handler *info);
 
+/**
+ * Gracefully leave the cluster, broadcast a notification.
+ * Members, received it, will remove a record about this instance
+ * from their tables, and will not consider it to be dead.
+ */
+void
+swim_quit(struct swim *swim);
+
 /** Get a SWIM member, describing this instance. */
 const struct swim_member *
 swim_self(struct swim *swim);
