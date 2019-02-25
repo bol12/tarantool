@@ -3393,7 +3393,32 @@ void sqlInsert(Parse *, SrcList *, Select *, IdList *,
 void *sqlArrayAllocate(sql *, void *, int, int *, int *);
 IdList *sqlIdListAppend(sql *, IdList *, Token *);
 int sqlIdListIndex(IdList *, const char *);
-SrcList *sqlSrcListEnlarge(sql *, SrcList *, int, int);
+
+/**
+ * Expand the space allocated for the given SrcList object by
+ * creating new_slots new slots beginning at start_idx.
+ * The start_idx is zero based. New slots are zeroed.
+ *
+ * For example, suppose a SrcList initially contains two entries:
+ * A,B.
+ * To append 3 new entries onto the end, do this:
+ *    sql_src_list_enlarge(db, pSrclist, 3, 2);
+ *
+ * After the call above it would contain:  A, B, nil, nil, nil.
+ * If the iStart argument had been 1 instead of 2, then the result
+ * would have been:  A, nil, nil, nil, B.  To prepend the new slots,
+ * the iStart value would be 0.  The result then would
+ * be: nil, nil, nil, A, B.
+ * @param db The database connection.
+ * @param src_list The SrcList to be enlarged.
+ * @param new_slots Number of new slots to add to src_list->a[].
+ * @param start_idx Index in pSrc->a[] of first new slot.
+ * @retval not NULL SrcList pointer on success.
+ * @retval NULL otherwise.
+ */
+struct SrcList *
+sql_src_list_enlarge(struct sql *db, struct SrcList *src_list, int new_slots,
+		     int start_idx);
 
 /**
  * Allocate a new empty SrcList object.
