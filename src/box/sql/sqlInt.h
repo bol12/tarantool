@@ -3429,7 +3429,53 @@ sql_src_list_enlarge(struct sql *db, struct SrcList *src_list, int new_slots,
 struct SrcList *
 sql_alloc_src_list(struct sql *db);
 
-SrcList *sqlSrcListAppend(sql *, SrcList *, Token *);
+/**
+ * Append a new table name to the given list.  Create a new
+ * SrcList if need be. A new entry is created in the list even
+ * if name_token is NULL.
+ *
+ * A SrcList is returned, or NULL if there is an OOM error.
+ * The returned SrcList might be the same as the SrcList that was
+ * input or it might be a new one. If an OOM error does occurs,
+ * then the prior value of list that is input to this routine is
+ * automatically freed.
+ *
+ * If pDatabase is not null, it means that the table has an
+ * optional database name prefix. Like this: "database.table".
+ * The pDatabase points to the table name and the pTable points
+ * to the database name. The SrcList.a[].zName field is filled
+ * with the table name which might come from pTable (if pDatabase
+ * is NULL) or from pDatabase.
+ * SrcList.a[].zDatabase is filled with the database name from
+ * name_token, or with NULL if no database is specified.
+ *
+ * In other words, if call like this:
+ *
+ *         sql_src_list_append(D,A,B,0);
+ *
+ * Then B is a table name and the database name is unspecified.
+ * If called like this:
+ *
+ *         sql_src_list_append(D,A,B,C);
+ *
+ * Then C is the table name and B is the database name.  If C is
+ * defined then so is B.  In other words, we never have a case
+ * where:
+ *
+ *         sql_src_list_append(D,A,0,C);
+ *
+ * Both pTable and pDatabase are assumed to be quoted. They are
+ * dequoted before being added to the SrcList.
+ * @param db The database connection.
+ * @param list Append to this SrcList. NULL creates a new SrcList.
+ * @param name_token Token representing table name.
+ * @retval not NULL SrcList pointer on success.
+ * @retval NULL otherwise.
+ */
+struct SrcList *
+sql_src_list_append(struct sql *db, struct SrcList *list,
+		    struct Token *name_token);
+
 SrcList *sqlSrcListAppendFromTerm(Parse *, SrcList *, Token *,
 				      Token *, Select *, Expr *, IdList *);
 void sqlSrcListIndexedBy(Parse *, SrcList *, Token *);
