@@ -1397,8 +1397,11 @@ vdbe_emit_stat_space_clear(struct Parse *parse, const char *stat_table_name,
 	struct sql *db = parse->db;
 	assert(!db->mallocFailed);
 	struct SrcList *src_list = sql_alloc_src_list(db);
-	if (src_list != NULL)
-		src_list->a[0].zName = sqlDbStrDup(db, stat_table_name);
+	if (src_list == NULL) {
+		sql_parser_error(parse);
+		return;
+	}
+	src_list->a[0].zName = sqlDbStrDup(db, stat_table_name);
 	struct Expr *where = NULL;
 	if (idx_name != NULL) {
 		struct Expr *expr = sql_id_eq_str_expr(parse, "idx", idx_name);
@@ -2666,19 +2669,20 @@ sqlSrcListEnlarge(sql * db,	/* Database connection to notify of OOM errors */
 	return pSrc;
 }
 
-SrcList *
-sql_alloc_src_list(sql *db)
+struct SrcList *
+sql_alloc_src_list(struct sql *db)
 {
-	SrcList *pList;
-
-	pList = sqlDbMallocRawNN(db, sizeof(SrcList));
-	if (pList == 0)
+	struct SrcList *src_list = sqlDbMallocRawNN(db, sizeof(SrcList));
+	if (src_list == NULL) {
+		diag_set(OutOfMemory, sizeof(SrcList), "sqlDbMallocRawNN",
+			 "src_list");
 		return NULL;
-	pList->nAlloc = 1;
-	pList->nSrc = 1;
-	memset(&pList->a[0], 0, sizeof(pList->a[0]));
-	pList->a[0].iCursor = -1;
-	return pList;
+	}
+	src_list->nAlloc = 1;
+	src_list->nSrc = 1;
+	memset(&src_list->a[0], 0, sizeof(src_list->a[0]));
+	src_list->a[0].iCursor = -1;
+	return src_list;
 }
 
 /*

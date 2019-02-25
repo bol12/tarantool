@@ -3394,8 +3394,16 @@ void *sqlArrayAllocate(sql *, void *, int, int *, int *);
 IdList *sqlIdListAppend(sql *, IdList *, Token *);
 int sqlIdListIndex(IdList *, const char *);
 SrcList *sqlSrcListEnlarge(sql *, SrcList *, int, int);
-SrcList *
-sql_alloc_src_list(sql *db);
+
+/**
+ * Allocate a new empty SrcList object.
+ * @param db The database connection.
+ * @retval not NULL list pointer on success.
+ * @retval NULL otherwise.
+ */
+struct SrcList *
+sql_alloc_src_list(struct sql *db);
+
 SrcList *sqlSrcListAppend(sql *, SrcList *, Token *);
 SrcList *sqlSrcListAppendFromTerm(Parse *, SrcList *, Token *,
 				      Token *, Select *, Expr *, IdList *);
