@@ -164,8 +164,11 @@ sqlSelectNew(Parse * pParse,	/* Parsing context */
 		pNew = &standin;
 	}
 	if (pEList == 0) {
-		pEList = sql_expr_list_append(pParse->db, NULL,
-					      sqlExpr(db, TK_ASTERISK, 0));
+		struct Expr *expr =
+			sql_op_expr_create(db, TK_ASTERISK, NULL);
+		if (expr == NULL)
+			sql_parser_error(pParse);
+		pEList = sql_expr_list_append(pParse->db, NULL, expr);
 	}
 	struct session MAYBE_UNUSED *user_session;
 	user_session = current_session();
@@ -486,7 +489,6 @@ addWhereTerm(Parse * pParse,	/* Parsing context */
 	     int isOuterJoin,	/* True if this is an OUTER join */
 	     Expr ** ppWhere)	/* IN/OUT: The WHERE clause to add to */
 {
-	sql *db = pParse->db;
 	Expr *pE1;
 	Expr *pE2;
 	Expr *pEq;
@@ -496,8 +498,12 @@ addWhereTerm(Parse * pParse,	/* Parsing context */
 	assert(pSrc->a[iLeft].space != NULL);
 	assert(pSrc->a[iRight].space != NULL);
 
-	pE1 = sqlCreateColumnExpr(db, pSrc, iLeft, iColLeft);
-	pE2 = sqlCreateColumnExpr(db, pSrc, iRight, iColRight);
+	pE1 = sql_column_expr_create(pParse->db, pSrc, iLeft, iColLeft);
+	if (pE1 == NULL)
+		sql_parser_error(pParse);
+	pE2 = sql_column_expr_create(pParse->db, pSrc, iRight, iColRight);
+	if (pE2 == NULL)
+		sql_parser_error(pParse);
 
 	pEq = sqlPExpr(pParse, TK_EQ, pE1, pE2);
 	if (pEq && isOuterJoin) {
@@ -506,7 +512,12 @@ addWhereTerm(Parse * pParse,	/* Parsing context */
 		ExprSetVVAProperty(pEq, EP_NoReduce);
 		pEq->iRightJoinTable = (i16) pE2->iTable;
 	}
-	*ppWhere = sqlExprAnd(db, *ppWhere, pEq);
+	if (*ppWhere != NULL || pEq != NULL) {
+		*ppWhere = sql_and_expr_create(pParse->db, *ppWhere, pEq);
+		if (*ppWhere == NULL)
+			sql_parser_error(pParse);
+	}
+	return;
 }
 
 /*
@@ -627,8 +638,13 @@ sqlProcessJoin(Parse * pParse, Select * p)
 		if (pRight->pOn) {
 			if (isOuter)
 				setJoinExpr(pRight->pOn, pRight->iCursor);
-			p->pWhere =
-			    sqlExprAnd(pParse->db, p->pWhere, pRight->pOn);
+			if (p->pWhere != NULL || pRight->pOn != NULL) {
+				p->pWhere = sql_and_expr_create(pParse->db,
+								p->pWhere,
+								pRight->pOn);
+				if (p->pWhere == NULL)
+					sql_parser_error(pParse);
+			}
 			pRight->pOn = 0;
 		}
 
@@ -3332,9 +3348,13 @@ multiSelectOrderBy(Parse * pParse,	/* Parsing context */
 					break;
 			}
 			if (j == nOrderBy) {
-				Expr *pNew = sqlExpr(db, TK_INTEGER, 0);
-				if (pNew == 0)
+				Expr *pNew =
+					sql_op_expr_create(db, TK_INTEGER,
+							   NULL);
+				if (pNew == NULL) {
+					sql_parser_error(pParse);
 					return SQL_NOMEM;
+				}
 				pNew->flags |= EP_IntValue;
 				pNew->u.iValue = i;
 				pOrderBy = sql_expr_list_append(pParse->db,
@@ -4207,17 +4227,23 @@ flattenSubquery(Parse * pParse,		/* Parsing context */
 			assert(pParent->pHaving == 0);
 			pParent->pHaving = pParent->pWhere;
 			pParent->pWhere = pWhere;
-			pParent->pHaving = sqlExprAnd(db,
-							  sqlExprDup(db,
-									 pSub->pHaving,
-									 0),
-							  pParent->pHaving);
+			struct Expr *sub_having = sqlExprDup(db, pSub->pHaving, 0);
+			if (sub_having != NULL || pParent->pHaving != NULL) {
+				pParent->pHaving =
+					sql_and_expr_create(db, sub_having,
+							    pParent->pHaving);
+				if (pParent->pHaving == NULL)
+					sql_parser_error(pParse);
+			}
 			assert(pParent->pGroupBy == 0);
 			pParent->pGroupBy =
 			    sql_expr_list_dup(db, pSub->pGroupBy, 0);
-		} else {
+		} else if (pWhere != NULL || pParent->pWhere != NULL) {
 			pParent->pWhere =
-			    sqlExprAnd(db, pWhere, pParent->pWhere);
+				sql_and_expr_create(db, pWhere,
+						    pParent->pWhere);
+			if (pParent->pWhere == NULL)
+				sql_parser_error(pParse);
 		}
 		substSelect(pParse, pParent, iParent, pSub->pEList, 0);
 
@@ -4322,8 +4348,14 @@ pushDownWhereTerms(Parse * pParse,	/* Parse context (for malloc() and error repo
 		while (pSubq) {
 			pNew = sqlExprDup(pParse->db, pWhere, 0);
 			pNew = substExpr(pParse, pNew, iCursor, pSubq->pEList);
-			pSubq->pWhere =
-			    sqlExprAnd(pParse->db, pSubq->pWhere, pNew);
+			if (pSubq->pWhere != NULL || pNew != NULL) {
+				pSubq->pWhere =
+					sql_and_expr_create(pParse->db,
+							    pSubq->pWhere,
+							    pNew);
+				if (pSubq->pWhere == NULL)
+					sql_parser_error(pParse);
+			}
 			pSubq = pSubq->pPrior;
 		}
 	}
@@ -4504,8 +4536,10 @@ convertCompoundSelectToSubquery(Walker * pWalker, Select * p)
 		return WRC_Abort;
 	*pNew = *p;
 	p->pSrc = pNewSrc;
-	p->pEList = sql_expr_list_append(pParse->db, NULL,
-					 sqlExpr(db, TK_ASTERISK, 0));
+	struct Expr *expr = sql_op_expr_create(db, TK_ASTERISK, NULL);
+	if (expr == NULL)
+		sql_parser_error(pParse);
+	p->pEList = sql_expr_list_append(pParse->db, NULL, expr);
 	p->op = TK_SELECT;
 	p->pWhere = 0;
 	pNew->pGroupBy = 0;
@@ -4989,18 +5023,24 @@ selectExpander(Walker * pWalker, Select * p)
 								continue;
 							}
 						}
-						pRight =
-						    sqlExpr(db, TK_ID,
+						pRight = sql_op_expr_create(
+								db, TK_ID,
 								zName);
+						if (pRight == NULL)
+							sql_parser_error(pParse);
 						zColname = zName;
 						zToFree = 0;
 						if (longNames
 						    || pTabList->nSrc > 1) {
 							Expr *pLeft;
-							pLeft =
-							    sqlExpr(db,
+							pLeft = sql_op_expr_create(
+									db,
 									TK_ID,
 									zTabName);
+							if (pLeft == NULL) {
+								sql_parser_error(
+									pParse);
+							}
 							pExpr =
 							    sqlPExpr(pParse,
 									 TK_DOT,

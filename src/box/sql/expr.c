@@ -149,16 +149,17 @@ sqlExprAddCollateToken(Parse * pParse,	/* Parsing context */
 			   int dequote	/* True to dequote pCollName */
     )
 {
-	if (pCollName->n > 0) {
-		Expr *pNew =
-		    sqlExprAlloc(pParse->db, TK_COLLATE, pCollName,
-				     dequote);
-		if (pNew) {
-			pNew->pLeft = pExpr;
-			pNew->flags |= EP_Collate | EP_Skip;
-			pExpr = pNew;
-		}
+	if (pCollName->n == 0)
+		return pExpr;
+	struct Expr *new_expr =
+		sql_expr_create(pParse->db, TK_COLLATE, pCollName, dequote);
+	if (new_expr == NULL) {
+		sql_parser_error(pParse);
+		return NULL;
 	}
+	new_expr->pLeft = pExpr;
+	new_expr->flags |= EP_Collate | EP_Skip;
+	pExpr = new_expr;
 	return pExpr;
 }
 
@@ -854,113 +855,62 @@ sqlExprSetHeightAndFlags(Parse * pParse, Expr * p)
 #define exprSetHeight(y)
 #endif				/* SQL_MAX_EXPR_DEPTH>0 */
 
-/*
- * This routine is the core allocator for Expr nodes.
- *
- * Construct a new expression node and return a pointer to it.  Memory
- * for this node and for the pToken argument is a single allocation
- * obtained from sqlDbMalloc().  The calling function
- * is responsible for making sure the node eventually gets freed.
- *
- * If dequote is true, then the token (if it exists) is dequoted.
- * If dequote is false, no dequoting is performed.  The deQuote
- * parameter is ignored if pToken is NULL or if the token does not
- * appear to be quoted.  If the quotes were of the form "..." (double-quotes)
- * then the EP_DblQuoted flag is set on the expression node.
- *
- * Special case:  If op==TK_INTEGER and pToken points to a string that
- * can be translated into a 32-bit integer, then the token is not
- * stored in u.zToken.  Instead, the integer values is written
- * into u.iValue and the EP_IntValue flag is set.  No extra storage
- * is allocated to hold the integer text and the dequote flag is ignored.
- */
-Expr *
-sqlExprAlloc(sql * db,	/* Handle for sqlDbMallocRawNN() */
-		 int op,	/* Expression opcode */
-		 const Token * pToken,	/* Token argument.  Might be NULL */
-		 int dequote	/* True to dequote */
-    )
+struct Expr *
+sql_expr_create(struct sql *db, int op, const Token *token, bool dequote)
 {
-	Expr *pNew;
-	int nExtra = 0;
-	int iValue = 0;
-
-	assert(db != 0);
-	if (pToken) {
-		if (op != TK_INTEGER || pToken->z == 0
-		    || sqlGetInt32(pToken->z, &iValue) == 0) {
-			nExtra = pToken->n + 1;
-			assert(iValue >= 0);
+	int extra_sz = 0;
+	int val = 0;
+	if (token != NULL) {
+		if (op != TK_INTEGER || token->z == NULL ||
+		    sqlGetInt32(token->z, &val) == 0) {
+			extra_sz = token->n + 1;
+			assert(val >= 0);
 		}
 	}
-	pNew = sqlDbMallocRawNN(db, sizeof(Expr) + nExtra);
-	if (pNew) {
-		memset(pNew, 0, sizeof(Expr));
-		pNew->op = (u8) op;
-		pNew->iAgg = -1;
-		if (pToken) {
-			if (nExtra == 0) {
-				pNew->flags |= EP_IntValue;
-				pNew->u.iValue = iValue;
-			} else {
-				pNew->u.zToken = (char *)&pNew[1];
-				assert(pToken->z != 0 || pToken->n == 0);
-				if (pToken->n)
-					memcpy(pNew->u.zToken, pToken->z,
-					       pToken->n);
-				pNew->u.zToken[pToken->n] = 0;
-				if (dequote){
-					if (pNew->u.zToken[0] == '"')
-						pNew->flags |= EP_DblQuoted;
-					if (pNew->op == TK_ID ||
-					    pNew->op == TK_COLLATE ||
-					    pNew->op == TK_FUNCTION){
-						sqlNormalizeName(pNew->u.zToken);
-					}else{
-						sqlDequote(pNew->u.zToken);
-					}
-				}
-			}
-		}
-#if SQL_MAX_EXPR_DEPTH>0
-		pNew->nHeight = 1;
+	struct Expr *expr = sqlDbMallocRawNN(db, sizeof(*expr) + extra_sz);
+	if (expr == NULL) {
+		diag_set(OutOfMemory, sizeof(*expr), "sqlDbMallocRawNN",
+			 "expr");
+		return NULL;
+	}
+
+	memset(expr, 0, sizeof(*expr));
+	expr->op = (u8)op;
+	expr->iAgg = -1;
+#if SQL_MAX_EXPR_DEPTH > 0
+	expr->nHeight = 1;
 #endif
+	if (token == NULL)
+		return expr;
+
+	if (extra_sz == 0) {
+		expr->flags |= EP_IntValue;
+		expr->u.iValue = val;
+	} else {
+		expr->u.zToken = (char *)&expr[1];
+		assert(token->z != NULL || token->n == 0);
+		memcpy(expr->u.zToken, token->z, token->n);
+		expr->u.zToken[token->n] = '\0';
+		if (dequote) {
+			if (expr->u.zToken[0] == '"')
+				expr->flags |= EP_DblQuoted;
+			if (expr->op == TK_ID || expr->op == TK_COLLATE ||
+			    expr->op == TK_FUNCTION)
+				sqlNormalizeName(expr->u.zToken);
+			else
+				sqlDequote(expr->u.zToken);
+		}
 	}
-	return pNew;
+	return expr;
 }
 
-/*
- * Allocate a new expression node from a zero-terminated token that has
- * already been dequoted.
- */
-Expr *
-sqlExpr(sql * db,	/* Handle for sqlDbMallocZero() (may be null) */
-	    int op,		/* Expression opcode */
-	    const char *zToken	/* Token argument.  Might be NULL */
-    )
+struct Expr *
+sql_op_expr_create(struct sql *db, int op, const char *name)
 {
-	Token x;
-	x.z = zToken;
-	x.n = zToken ? sqlStrlen30(zToken) : 0;
-	return sqlExprAlloc(db, op, &x, 0);
-}
-
-/* Allocate a new expression and initialize it as integer.
- * @param db sql engine.
- * @param value Value to initialize by.
- *
- * @retval not NULL Allocated and initialized expr.
- * @retval     NULL Memory error.
- */
-Expr *
-sqlExprInteger(sql * db, int value)
-{
-	Expr *ret = sqlExpr(db, TK_INTEGER, NULL);
-	if (ret != NULL) {
-		ret->flags = EP_IntValue;
-		ret->u.iValue = value;
-	}
-	return ret;
+	struct Token name_token;
+	name_token.z = name;
+	name_token.n = name != NULL ? strlen(name) : 0;
+	return sql_expr_create(db, op, &name_token, false);
 }
 
 /*
@@ -1006,8 +956,15 @@ sqlPExpr(Parse * pParse,	/* Parsing context */
 {
 	Expr *p;
 	if (op == TK_AND && pParse->nErr == 0) {
-		/* Take advantage of short-circuit false optimization for AND */
-		p = sqlExprAnd(pParse->db, pLeft, pRight);
+		/*
+		 * Take advantage of short-circuit false
+		 * optimization for AND.
+		 */
+		if (pLeft == NULL && pRight == NULL)
+			return NULL;
+		p = sql_and_expr_create(pParse->db, pLeft, pRight);
+		if (p == NULL)
+			sql_parser_error(pParse);
 	} else {
 		p = sqlDbMallocRawNN(pParse->db, sizeof(Expr));
 		if (p) {
@@ -1076,30 +1033,26 @@ exprAlwaysFalse(Expr * p)
 	return v == 0;
 }
 
-/*
- * Join two expressions using an AND operator.  If either expression is
- * NULL, then just return the other expression.
- *
- * If one side or the other of the AND is known to be false, then instead
- * of returning an AND expression, just return a constant expression with
- * a value of false.
- */
-Expr *
-sqlExprAnd(sql * db, Expr * pLeft, Expr * pRight)
+struct Expr *
+sql_and_expr_create(struct sql *db, struct Expr *left_expr,
+		    struct Expr *right_expr)
 {
-	if (pLeft == 0) {
-		return pRight;
-	} else if (pRight == 0) {
-		return pLeft;
-	} else if (exprAlwaysFalse(pLeft) || exprAlwaysFalse(pRight)) {
-		sql_expr_delete(db, pLeft, false);
-		sql_expr_delete(db, pRight, false);
-		return sqlExprAlloc(db, TK_INTEGER, &sqlIntTokens[0],
-					0);
+	if (left_expr == NULL) {
+		assert(right_expr != NULL);
+		return right_expr;
+	} else if (right_expr == NULL) {
+		assert(left_expr != NULL);
+		return left_expr;
+	} else if (exprAlwaysFalse(left_expr) || exprAlwaysFalse(right_expr)) {
+		sql_expr_delete(db, left_expr, false);
+		sql_expr_delete(db, right_expr, false);
+		return sql_expr_create(db, TK_INTEGER, &sqlIntTokens[0],
+				       false);
 	} else {
-		Expr *pNew = sqlExprAlloc(db, TK_AND, 0, 0);
-		sqlExprAttachSubtrees(db, pNew, pLeft, pRight);
-		return pNew;
+		struct Expr *new_expr =
+			sql_expr_create(db, TK_AND, NULL, false);
+		sqlExprAttachSubtrees(db, new_expr, left_expr, right_expr);
+		return new_expr;
 	}
 }
 
@@ -1110,18 +1063,18 @@ sqlExprAnd(sql * db, Expr * pLeft, Expr * pRight)
 Expr *
 sqlExprFunction(Parse * pParse, ExprList * pList, Token * pToken)
 {
-	Expr *pNew;
-	sql *db = pParse->db;
-	assert(pToken);
-	pNew = sqlExprAlloc(db, TK_FUNCTION, pToken, 1);
-	if (pNew == 0) {
-		sql_expr_list_delete(db, pList);	/* Avoid memory leak when malloc fails */
-		return 0;
+	struct sql *db = pParse->db;
+	assert(pToken != NULL);
+	struct Expr *new_expr = sql_expr_create(db, TK_FUNCTION, pToken, true);
+	if (new_expr == NULL) {
+		sql_expr_list_delete(db, pList);
+		sql_parser_error(pParse);
+		return NULL;
 	}
-	pNew->x.pList = pList;
-	assert(!ExprHasProperty(pNew, EP_xIsSelect));
-	sqlExprSetHeightAndFlags(pParse, pNew);
-	return pNew;
+	new_expr->x.pList = pList;
+	assert(!ExprHasProperty(new_expr, EP_xIsSelect));
+	sqlExprSetHeightAndFlags(pParse, new_expr);
+	return new_expr;
 }
 
 /*
@@ -2911,10 +2864,12 @@ sqlCodeSubselect(Parse * pParse,	/* Parsing context */
 			}
 			if (pSel->pLimit == NULL) {
 				pSel->pLimit =
-					sqlExprAlloc(pParse->db, TK_INTEGER,
-							 &sqlIntTokens[1],
-							 0);
-				if (pSel->pLimit != NULL) {
+					sql_expr_create(pParse->db, TK_INTEGER,
+							&sqlIntTokens[1],
+							false);
+				if (pSel->pLimit == NULL) {
+					sql_parser_error(pParse);
+				} else {
 					ExprSetProperty(pSel->pLimit,
 							EP_System);
 				}

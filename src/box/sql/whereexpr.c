@@ -307,8 +307,10 @@ like_optimization_is_valid(Parse *pParse, Expr *pExpr, Expr **ppPrefix,
 			Expr *pPrefix;
 			*pisComplete = c == MATCH_ALL_WILDCARD &&
 				       z[cnt + 1] == 0;
-			pPrefix = sqlExpr(db, TK_STRING, z);
-			if (pPrefix)
+			pPrefix = sql_op_expr_create(db, TK_STRING, z);
+			if (pPrefix == NULL)
+				sql_parser_error(pParse);
+			else
 				pPrefix->u.zToken[cnt] = 0;
 			*ppPrefix = pPrefix;
 			if (op == TK_VARIABLE) {
@@ -1306,10 +1308,12 @@ exprAnalyze(SrcList * pSrc,	/* the FROM clause */
 		Expr *pLeft = pExpr->pLeft;
 		int idxNew;
 		WhereTerm *pNewTerm;
-
-		pNewExpr = sqlPExpr(pParse, TK_GT,
-					sqlExprDup(db, pLeft, 0),
-					sqlExprAlloc(db, TK_NULL, 0, 0));
+		struct Expr *expr =
+			sql_expr_create(db, TK_NULL, NULL, false);
+		if (expr == NULL)
+			sql_parser_error(pParse);
+		pNewExpr = sqlPExpr(pParse, TK_GT, sqlExprDup(db, pLeft, 0),
+				    expr);
 
 		idxNew = whereClauseInsert(pWC, pNewExpr,
 					   TERM_VIRTUAL | TERM_DYNAMIC |
@@ -1502,9 +1506,11 @@ sqlWhereTabFuncArgs(Parse * pParse,	/* Parsing context */
 					space_def->name, j);
 			return;
 		}
-		pColRef = sqlExprAlloc(pParse->db, TK_COLUMN, 0, 0);
-		if (pColRef == 0)
+		pColRef = sql_expr_create(pParse->db, TK_COLUMN, NULL, false);
+		if (pColRef == NULL) {
+			sql_parser_error(pParse);
 			return;
+		}
 		pColRef->iTable = pItem->iCursor;
 		pColRef->iColumn = k++;
 		pColRef->space_def = space_def;

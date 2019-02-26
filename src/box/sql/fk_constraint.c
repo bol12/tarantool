@@ -308,32 +308,30 @@ fk_constraint_lookup_parent(struct Parse *parse_context, struct space *parent,
  * regBase is the first of an array of register that contains
  * the data for given space.  regBase+1 holds the first column.
  * regBase+2 holds the second column, and so forth.
- *
- * @param pParse Parsing and code generating context.
+ * @param parser The parsing context.
  * @param def Definition of space whose content is at r[regBase]...
- * @param regBase Contents of table defined by def.
- * @param iCol Which column of space is desired.
- * @return an Expr object that refers to a memory register
- *         corresponding to column iCol of given space.
+ * @param reg_base Contents of table table.
+ * @param column Index of table column is desired.
+ * @retval no NULL expression pointer on success.
+ * @retval NULL otherwise.
  */
-static Expr *
-space_field_register(Parse *pParse, struct space_def *def, int regBase,
-		     i16 iCol)
+static struct Expr *
+sql_register_expr_create(struct Parse *parser, struct space_def *def, int reg_base,
+			 int column)
 {
-	Expr *pExpr;
-	sql *db = pParse->db;
-
-	pExpr = sqlExpr(db, TK_REGISTER, 0);
-	if (pExpr) {
-		if (iCol >= 0) {
-			pExpr->iTable = regBase + iCol + 1;
-			pExpr->type = def->fields[iCol].type;
-		} else {
-			pExpr->iTable = regBase;
-			pExpr->type = FIELD_TYPE_INTEGER;
-		}
+	struct Expr *expr = sql_op_expr_create(parser->db, TK_REGISTER, NULL);
+	if (expr == NULL) {
+		sql_parser_error(parser);
+		return NULL;
 	}
-	return pExpr;
+	if (column >= 0) {
+		expr->iTable = reg_base + column + 1;
+		expr->type = def->fields[column].type;
+	} else {
+		expr->iTable = reg_base;
+		expr->type = FIELD_TYPE_INTEGER;
+	}
+	return expr;
 }
 
 /**
@@ -346,16 +344,17 @@ space_field_register(Parse *pParse, struct space_def *def, int regBase,
  * @retval not NULL on success.
  * @retval NULL on error.
  */
-static Expr *
-exprTableColumn(sql * db, struct space_def *def, int cursor, i16 column)
+static struct Expr *
+sql_column_cursor_expr_create(struct sql *db, struct space_def *def,
+			      int cursor, int column)
 {
-	Expr *pExpr = sqlExpr(db, TK_COLUMN, 0);
-	if (pExpr) {
-		pExpr->space_def = def;
-		pExpr->iTable = cursor;
-		pExpr->iColumn = column;
-	}
-	return pExpr;
+	struct Expr *expr = sql_op_expr_create(db, TK_COLUMN, NULL);
+	if (expr == NULL)
+		return NULL;
+	expr->space_def = def;
+	expr->iTable = cursor;
+	expr->iColumn = column;
+	return expr;
 }
 
 /*
@@ -435,12 +434,20 @@ fk_constraint_scan_children(struct Parse *parser, struct SrcList *src,
 	for (uint32_t i = 0; i < fk_def->field_count; i++) {
 		uint32_t fieldno = fk_def->links[i].parent_field;
 		struct Expr *pexpr =
-			space_field_register(parser, def, reg_data, fieldno);
+			sql_register_expr_create(parser, def, reg_data,
+						 fieldno);
 		fieldno = fk_def->links[i].child_field;
 		const char *field_name = child_space->def->fields[fieldno].name;
-		struct Expr *chexpr = sqlExpr(db, TK_ID, field_name);
+		struct Expr *chexpr =
+			sql_op_expr_create(db, TK_ID, field_name);
+		if (chexpr == NULL)
+			sql_parser_error(parser);
 		struct Expr *eq = sqlPExpr(parser, TK_EQ, pexpr, chexpr);
-		where = sqlExprAnd(db, where, eq);
+		if (where != NULL || eq != NULL) {
+			where = sql_and_expr_create(db, where, eq);
+			if (where == NULL)
+				sql_parser_error(parser);
+		}
 	}
 
 	/*
@@ -456,15 +463,26 @@ fk_constraint_scan_children(struct Parse *parser, struct SrcList *src,
 		struct Expr *expr = NULL, *pexpr, *chexpr, *eq;
 		for (uint32_t i = 0; i < fk_def->field_count; i++) {
 			uint32_t fieldno = fk_def->links[i].parent_field;
-			pexpr = space_field_register(parser, def, reg_data,
-						     fieldno);
-			chexpr = exprTableColumn(db, def, src->a[0].iCursor,
-						 fieldno);
+			pexpr = sql_register_expr_create(parser, def, reg_data,
+							 fieldno);
+			int cursor = src->a[0].iCursor;
+			chexpr = sql_column_cursor_expr_create(db, def, cursor,
+							       fieldno);
+			if (chexpr == NULL)
+				sql_parser_error(parser);
 			eq = sqlPExpr(parser, TK_EQ, pexpr, chexpr);
-			expr = sqlExprAnd(db, expr, eq);
+			if (expr != NULL || eq != NULL) {
+				expr = sql_and_expr_create(db, expr, eq);
+				if (expr == NULL)
+					sql_parser_error(parser);
+			}
 		}
 		struct Expr *pNe = sqlPExpr(parser, TK_NOT, expr, 0);
-		where = sqlExprAnd(db, where, pNe);
+		if (where != NULL || pNe != NULL) {
+			where = sql_and_expr_create(db, where, pNe);
+			if (where == NULL)
+				sql_parser_error(parser);
+		}
 	}
 
 	/* Resolve the references in the WHERE clause. */
@@ -785,14 +803,26 @@ fk_constraint_action_trigger(struct Parse *pParse, struct space_def *def,
 		 * type and collation sequence associated with
 		 * the parent table are used for the comparison.
 		 */
-		struct Expr *to_col =
-			sqlPExpr(pParse, TK_DOT,
-				     sqlExprAlloc(db, TK_ID, &t_old, 0),
-				     sqlExprAlloc(db, TK_ID, &t_to_col, 0));
-		struct Expr *from_col =
-			sqlExprAlloc(db, TK_ID, &t_from_col, 0);
-		struct Expr *eq = sqlPExpr(pParse, TK_EQ, to_col, from_col);
-		where = sqlExprAnd(db, where, eq);
+		struct Expr *old_expr = NULL, *new_expr = NULL, *expr = NULL;
+		old_expr = sql_expr_create(db, TK_ID, &t_old, false);
+		if (old_expr == NULL)
+			sql_parser_error(pParse);
+		expr = sql_expr_create(db, TK_ID, &t_to_col, false);
+		if (expr == NULL)
+			sql_parser_error(pParse);
+		struct Expr *from_col_expr =
+			sql_expr_create(db, TK_ID, &t_from_col, false);
+		if (from_col_expr == NULL)
+			sql_parser_error(pParse);
+		struct Expr *to_col_expr =
+			sqlPExpr(pParse, TK_DOT, old_expr, expr);
+		struct Expr *eq =
+			sqlPExpr(pParse, TK_EQ, to_col_expr, from_col_expr);
+		if (where != NULL || eq != NULL) {
+			where = sql_and_expr_create(db, where, eq);
+			if (where == NULL)
+				sql_parser_error(pParse);
+		}
 
 		/*
 		 * For ON UPDATE, construct the next term of the
@@ -810,12 +840,22 @@ fk_constraint_action_trigger(struct Parse *pParse, struct space_def *def,
 		 *        no_action_needed(colN))
 		 */
 		if (is_update) {
+			old_expr = sql_expr_create(db, TK_ID, &t_old, false);
+			if (old_expr == NULL)
+				sql_parser_error(pParse);
+			expr = sql_expr_create(db, TK_ID, &t_to_col, false);
+			if (expr == NULL)
+				sql_parser_error(pParse);
 			struct Expr *old_val = sqlPExpr(pParse, TK_DOT,
-				sqlExprAlloc(db, TK_ID, &t_old, 0),
-				sqlExprAlloc(db, TK_ID, &t_to_col, 0));
+							old_expr, expr);
+			new_expr = sql_expr_create(db, TK_ID, &t_new, false);
+			if (new_expr == NULL)
+				sql_parser_error(pParse);
+			expr = sql_expr_create(db, TK_ID, &t_to_col, false);
+			if (expr == NULL)
+				sql_parser_error(pParse);
 			struct Expr *new_val = sqlPExpr(pParse, TK_DOT,
-				sqlExprAlloc(db, TK_ID, &t_new, 0),
-				sqlExprAlloc(db, TK_ID, &t_to_col, 0));
+							new_expr, expr);
 			struct Expr *old_is_null = sqlPExpr(
 				pParse, TK_ISNULL,
 				sqlExprDup(db, old_val, 0), NULL);
@@ -828,29 +868,41 @@ fk_constraint_action_trigger(struct Parse *pParse, struct space_def *def,
 			struct Expr *no_action_needed =
 				sqlPExpr(pParse, TK_OR, old_is_null,
 					     non_null_eq);
-			when = sqlExprAnd(db, when, no_action_needed);
+			if (when != NULL || no_action_needed != NULL) {
+				when = sql_and_expr_create(db, when,
+							   no_action_needed);
+				if (when == NULL)
+					sql_parser_error(pParse);
+			}
 		}
 
 		if (action != FKEY_ACTION_RESTRICT &&
 		    (action != FKEY_ACTION_CASCADE || is_update)) {
 			struct Expr *new, *d;
 			if (action == FKEY_ACTION_CASCADE) {
-				new = sqlPExpr(pParse, TK_DOT,
-						   sqlExprAlloc(db, TK_ID,
-								    &t_new, 0),
-						   sqlExprAlloc(db, TK_ID,
-								    &t_to_col,
-								    0));
+				new_expr = sql_expr_create(db, TK_ID, &t_new,
+							   false);
+				if (new_expr == NULL)
+					sql_parser_error(pParse);
+				expr = sql_expr_create(db, TK_ID, &t_to_col,
+						       false);
+				if (expr == NULL)
+					sql_parser_error(pParse);
+				new = sqlPExpr(pParse, TK_DOT, new_expr, expr);
 			} else if (action == FKEY_ACTION_SET_DEFAULT) {
 				d = child_fields[chcol].default_value_expr;
 				if (d != NULL) {
 					new = sqlExprDup(db, d, 0);
 				} else {
-					new = sqlExprAlloc(db, TK_NULL,
-							       NULL, 0);
+					new = sql_expr_create(db, TK_NULL,
+							      NULL, false);
+					if (new == NULL)
+						sql_parser_error(pParse);
 				}
 			} else {
-				new = sqlExprAlloc(db, TK_NULL, NULL, 0);
+				new = sql_expr_create(db, TK_NULL, NULL, false);
+				if (new == NULL)
+					sql_parser_error(pParse);
 			}
 			list = sql_expr_list_append(db, list, new);
 			sqlExprListSetName(pParse, list, &t_from_col, 0);
@@ -864,9 +916,12 @@ fk_constraint_action_trigger(struct Parse *pParse, struct space_def *def,
 		struct Token err;
 		err.z = space_name;
 		err.n = name_len;
-		struct Expr *r = sqlExpr(db, TK_RAISE, "FOREIGN KEY "\
-					     "constraint failed");
-		if (r != NULL)
+		struct Expr *r =
+			sql_op_expr_create(db, TK_RAISE,
+					   "FOREIGN KEY constraint failed");
+		if (r == NULL)
+			sql_parser_error(pParse);
+		else
 			r->on_conflict_action = ON_CONFLICT_ACTION_ABORT;
 		struct SrcList *src_list = sql_src_list_append(db, NULL, &err);
 		if (src_list == NULL)
