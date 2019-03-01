@@ -145,32 +145,15 @@ luaT_httpc_request(lua_State *L)
 	if (ctx == NULL)
 		return luaL_error(L, "can't get httpc environment");
 
-	const char *method = luaL_checkstring(L, 2);
-	const char *url  = luaL_checkstring(L, 3);
-
-	struct httpc_request *req = httpc_request_new(ctx, method, url);
+	struct httpc_request *req = httpc_request_new(ctx);
 	if (req == NULL)
 		return luaT_error(L);
 
-	double timeout = TIMEOUT_INFINITY;
-	int max_header_name_length = HEADER_NAME_LEN;
-	if (lua_isstring(L, 4)) {
-		size_t len = 0;
-		const char *body = lua_tolstring(L, 4, &len);
-		if (len > 0 && httpc_set_body(req, body, len) != 0) {
-			httpc_request_delete(req);
-			return luaT_error(L);
-		}
-	} else if (!lua_isnil(L, 4)) {
-		httpc_request_delete(req);
-		return luaL_error(L, "fourth argument must be a string");
-	}
-
-	if (!lua_istable(L, 5)) {
-		httpc_request_delete(req);
-		return luaL_error(L, "fifth argument must be a table");
-	}
-
+	/*
+	 * All user-defined headers must be set before calling
+	 * other httpc module methods so that they take priority
+	 * over the headers that httpc tries to set automatically.
+	 */
 	lua_getfield(L, 5, "headers");
 	if (!lua_isnil(L, -1)) {
 		lua_pushnil(L);
@@ -198,6 +181,32 @@ luaT_httpc_request(lua_State *L)
 		}
 	}
 	lua_pop(L, 1);
+
+	const char *method = luaL_checkstring(L, 2);
+	const char *url  = luaL_checkstring(L, 3);
+	if (httpc_set_url(req, method, url) != 0) {
+		httpc_request_delete(req);
+		return luaT_error(L);
+	}
+
+	double timeout = TIMEOUT_INFINITY;
+	int max_header_name_length = HEADER_NAME_LEN;
+	if (lua_isstring(L, 4)) {
+		size_t len = 0;
+		const char *body = lua_tolstring(L, 4, &len);
+		if (len > 0 && httpc_set_body(req, body, len) != 0) {
+			httpc_request_delete(req);
+			return luaT_error(L);
+		}
+	} else if (!lua_isnil(L, 4)) {
+		httpc_request_delete(req);
+		return luaL_error(L, "fourth argument must be a string");
+	}
+
+	if (!lua_istable(L, 5)) {
+		httpc_request_delete(req);
+		return luaL_error(L, "fifth argument must be a table");
+	}
 
 	lua_getfield(L, 5, "ca_path");
 	if (!lua_isnil(L, -1))
