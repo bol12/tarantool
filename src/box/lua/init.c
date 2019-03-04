@@ -60,6 +60,7 @@
 #include "box/lua/tuple.h"
 #include "box/lua/sql.h"
 #include "box/lua/key_def.h"
+#include "box/lua/merger.h"
 
 extern char session_lua[],
 	tuple_lua[],
@@ -69,7 +70,8 @@ extern char session_lua[],
 	feedback_daemon_lua[],
 	net_box_lua[],
 	upgrade_lua[],
-	console_lua[];
+	console_lua[],
+	merger_lua[];
 
 static const char *lua_sources[] = {
 	"box/session", session_lua,
@@ -81,6 +83,7 @@ static const char *lua_sources[] = {
 	"box/console", console_lua,
 	"box/load_cfg", load_cfg_lua,
 	"box/xlog", xlog_lua,
+	"box/merger", merger_lua,
 	NULL
 };
 
@@ -314,6 +317,8 @@ box_lua_init(struct lua_State *L)
 	tarantool_lua_console_init(L);
 	lua_pop(L, 1);
 	luaopen_key_def(L);
+	lua_pop(L, 1);
+	luaopen_merger(L);
 	lua_pop(L, 1);
 
 	/* Load Lua extension */
