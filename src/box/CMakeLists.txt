@@ -119,6 +119,7 @@ add_library(box STATIC
     execute.c
     wal.c
     call.c
+    merger.c
     ${lua_sources}
     lua/init.c
     lua/call.c

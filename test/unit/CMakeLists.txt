@@ -217,3 +217,6 @@ target_link_libraries(checkpoint_schedule.test m unit)
 
 add_executable(sio.test sio.c)
 target_link_libraries(sio.test unit core)
+
+add_executable(merger.test merger.test.c)
+target_link_libraries(merger.test unit core box)
