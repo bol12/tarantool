@@ -402,6 +402,33 @@ vsequence_filter(struct space *source, struct tuple *tuple)
 	       ((PRIV_WRDA | PRIV_X) & effective);
 }
 
+static bool
+vcollation_filter(struct space *source, struct tuple *tuple)
+{
+	struct credentials *cr = effective_user();
+	/*
+	 * Allow access for a user with read, write,
+	 * drop, alter or execute privileges for universe.
+	 */
+	if ((PRIV_WRDA | PRIV_X) & cr->universal_access)
+		return true;
+	/* Allow access for a user with sequence privileges. */
+	if ((PRIV_WRDA | PRIV_X) &
+	    entity_access_get(SC_SEQUENCE)[cr->auth_token].effective)
+		return true;
+	if (PRIV_R & source->access[cr->auth_token].effective)
+		return true; /* read access to _sequence space */
+
+	uint32_t collation_id;
+	if (tuple_field_u32(tuple, BOX_COLLATION_FIELD_ID, &collation_id) != 0)
+		return false;
+	uint32_t collation_uid;
+	if (tuple_field_u32(tuple, BOX_COLLATION_FIELD_UID, &collation_uid) != 0)
+		return false;
+	/* Allow access for privilege grantor or grantee. */
+	return collation_id == cr->uid || collation_uid == cr->uid;
+}
+
 static struct index *
 sysview_space_create_index(struct space *space, struct index_def *def)
 {
@@ -427,6 +454,10 @@ sysview_space_create_index(struct space *space, struct index_def *def)
 		source_space_id = BOX_INDEX_ID;
 		source_index_id = def->iid;
 		filter = vspace_filter;
+	case BOX_VCOLLATION_ID:
+		source_space_id = BOX_COLLATION_ID;
+		source_index_id = def->iid;
+		filter = vcollation_filter;
 		break;
 	case BOX_VUSER_ID:
 		source_space_id = BOX_USER_ID;
