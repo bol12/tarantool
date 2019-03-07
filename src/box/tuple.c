@@ -455,7 +455,8 @@ tuple_field_go_to_key(const char **field, const char *key, int len)
 }
 
 int
-tuple_go_to_path(const char **data, const char *path, uint32_t path_len)
+tuple_go_to_path_multikey(const char **data, const char *path,
+			  uint32_t path_len, uint64_t multikey_idx)
 {
 	int rc;
 	struct json_lexer lexer;
@@ -463,6 +464,8 @@ tuple_go_to_path(const char **data, const char *path, uint32_t path_len)
 	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
 	while ((rc = json_lexer_next_token(&lexer, &token)) == 0) {
 		switch (token.type) {
+		case JSON_TOKEN_ANY:
+			token.num = (int)multikey_idx;
 		case JSON_TOKEN_NUM:
 			rc = tuple_field_go_to_index(data, token.num);
 			break;
@@ -532,7 +535,8 @@ tuple_field_raw_by_full_path(struct tuple_format *format, const char *tuple,
 	}
 	return tuple_field_raw_by_path(format, tuple, field_map, fieldno,
 				       path + lexer.offset,
-				       path_len - lexer.offset, NULL);
+				       path_len - lexer.offset, NULL,
+				       INVALID_MULTIKEY_INDEX);
 }
 
 /* }}} tuple_field_* getters */

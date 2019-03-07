@@ -45,6 +45,8 @@ struct slab_arena;
 struct quota;
 struct key_part;
 
+#define INVALID_MULTIKEY_INDEX UINT64_MAX
+
 /**
  * A format for standalone tuples allocated on runtime arena.
  * \sa tuple_new().
@@ -286,6 +288,7 @@ box_tuple_upsert(const box_tuple_t *tuple, const char *expr, const
 
 /** \endcond public */
 
+
 /**
  * An atom of Tarantool storage. Represents MsgPack Array.
  * Tuple has the following structure:
@@ -296,7 +299,9 @@ box_tuple_upsert(const box_tuple_t *tuple, const char *expr, const
  * |                                            ^
  * +---------------------------------------data_offset
  *
- * Each 'off_i' is the offset to the i-th indexed field.
+ * Each 'off_i' is the offset to the i-th indexed field or field
+ * map extention (described with struct tuple_field_map_ext)
+ * offset (in sizeof(field_map[0]) units).
  */
 struct PACKED tuple
 {
@@ -327,6 +332,26 @@ struct PACKED tuple
 	 * char raw[0];
 	 */
 };
+
+/**
+ * Tuple field map extent. Is allocated on tuple_field_map_create
+ * call automatically when necessary, when tuple field map must be
+ * reallocated dynamically.
+ */
+struct field_map_ext {
+	/* Sequence of data offset slots. */
+	uint32_t field_map[1];
+	/* The count of field_map items. */
+	uint32_t size;
+};
+
+static inline struct field_map_ext *
+tuple_field_map_ext(uint32_t *field_map, int32_t root_offset_slot)
+{
+	uint32_t slot_off = field_map[root_offset_slot];
+	return (struct field_map_ext *)((char *)field_map -
+		slot_off * sizeof(uint32_t) - sizeof(struct field_map_ext));
+}
 
 /** Size of the tuple including size of struct tuple. */
 static inline size_t
@@ -508,11 +533,32 @@ tuple_field_count(const struct tuple *tuple)
  *                      with NULL.
  * @param path The path to process.
  * @param path_len The length of the @path.
+ * @param multikey_index The multikey index hint - index of item
+ *                       for JSON_TOKEN_ANY level.
  * @retval 0 On success.
  * @retval -1 In case of error in JSON path.
  */
 int
-tuple_go_to_path(const char **data, const char *path, uint32_t path_len);
+tuple_go_to_path_multikey(const char **data, const char *path,
+			  uint32_t path_len, uint64_t multikey_idx);
+
+/**
+ * Retrieve msgpack data by JSON path.
+ * @param data[in, out] Pointer to msgpack with data.
+ *                      If the field cannot be retrieved be the
+ *                      specified path @path, it is overwritten
+ *                      with NULL.
+ * @param path The path to process.
+ * @param path_len The length of the @path.
+ * @retval 0 On success.
+ * @retval -1 In case of error in JSON path.
+ */
+static inline int
+tuple_go_to_path(const char **data, const char *path, uint32_t path_len)
+{
+	return tuple_go_to_path_multikey(data, path, path_len,
+					 INVALID_MULTIKEY_INDEX);
+}
 
 /**
  * Get tuple field by field index and relative JSON path.
@@ -533,7 +579,7 @@ static inline const char *
 tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 			const uint32_t *field_map, uint32_t fieldno,
 			const char *path, uint32_t path_len,
-			int32_t *offset_slot_hint)
+			int32_t *offset_slot_hint, uint64_t multikey_idx)
 {
 	int32_t offset_slot;
 	if (offset_slot_hint != NULL &&
@@ -558,10 +604,22 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 		if (offset_slot_hint != NULL)
 			*offset_slot_hint = offset_slot;
 offset_slot_access:
-		/* Indexed field */
-		if (field_map[offset_slot] == 0)
-			return NULL;
-		tuple += field_map[offset_slot];
+		if (multikey_idx != INVALID_MULTIKEY_INDEX) {
+			struct field_map_ext *field_map_ext =
+				tuple_field_map_ext((uint32_t *)field_map,
+						    offset_slot);
+			if (multikey_idx >= field_map_ext->size)
+				return NULL;
+			uint32_t off = field_map_ext->field_map[-multikey_idx];
+			if (off == 0)
+				return NULL;
+			tuple += off;
+		} else {
+			/* Indexed field */
+			if (field_map[offset_slot] == 0)
+				return NULL;
+			tuple += field_map[offset_slot];
+		}
 	} else {
 		uint32_t field_count;
 parse:
@@ -572,8 +630,8 @@ parse:
 		for (uint32_t k = 0; k < fieldno; k++)
 			mp_next(&tuple);
 		if (path != NULL &&
-		    unlikely(tuple_go_to_path(&tuple, path,
-						    path_len) != 0))
+		    unlikely(tuple_go_to_path_multikey(&tuple, path, path_len,
+						       multikey_idx) != 0))
 			return NULL;
 	}
 	return tuple;
@@ -595,7 +653,7 @@ tuple_field_raw(struct tuple_format *format, const char *tuple,
 		const uint32_t *field_map, uint32_t field_no)
 {
 	return tuple_field_raw_by_path(format, tuple, field_map, field_no,
-				       NULL, 0, NULL);
+				       NULL, 0, NULL, INVALID_MULTIKEY_INDEX);
 }
 
 /**
@@ -634,16 +692,18 @@ tuple_field_raw_by_full_path(struct tuple_format *format, const char *tuple,
 			     uint32_t path_len, uint32_t path_hash);
 
 /**
- * Get a tuple field pointed to by an index part.
+ * Get a tuple field pointed to by an index part and multikey hint.
  * @param format Tuple format.
  * @param tuple A pointer to MessagePack array.
  * @param field_map A pointer to the LAST element of field map.
+ * @param multikey_idx A multikey hint.
  * @param part Index part to use.
  * @retval Field data if the field exists or NULL.
  */
 static inline const char *
-tuple_field_raw_by_part(struct tuple_format *format, const char *data,
-			const uint32_t *field_map, struct key_part *part)
+tuple_field_raw_by_part_multikey(struct tuple_format *format, const char *data,
+				 const uint32_t *field_map,
+				 struct key_part *part, uint64_t multikey_idx)
 {
 	if (unlikely(part->format_epoch != format->epoch)) {
 		assert(format->epoch != 0);
@@ -656,7 +716,41 @@ tuple_field_raw_by_part(struct tuple_format *format, const char *data,
 	}
 	return tuple_field_raw_by_path(format, data, field_map, part->fieldno,
 				       part->path, part->path_len,
-				       &part->offset_slot_cache);
+				       &part->offset_slot_cache, multikey_idx);
+}
+
+/**
+ * Get a field refereed by index @part and multikey hint in tuple.
+ * @param tuple Tuple to get the field from.
+ * @param part Index part to use.
+ * @param multikey_idx A multikey hint.
+ * @retval Field data if the field exists or NULL.
+ */
+static inline const char *
+tuple_field_by_part_multikey(const struct tuple *tuple, struct key_part *part,
+			     uint64_t multikey_idx)
+{
+	return tuple_field_raw_by_part_multikey(tuple_format(tuple),
+						tuple_data(tuple),
+						tuple_field_map(tuple), part,
+						multikey_idx);
+}
+
+
+/**
+ * Get a tuple field pointed to by an index part.
+ * @param format Tuple format.
+ * @param tuple A pointer to MessagePack array.
+ * @param field_map A pointer to the LAST element of field map.
+ * @param part Index part to use.
+ * @retval Field data if the field exists or NULL.
+ */
+static inline const char *
+tuple_field_raw_by_part(struct tuple_format *format, const char *data,
+			const uint32_t *field_map, struct key_part *part)
+{
+	return tuple_field_raw_by_part_multikey(format, data, field_map,
+						part, INVALID_MULTIKEY_INDEX);
 }
 
 /**

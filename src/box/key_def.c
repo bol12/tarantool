@@ -165,9 +165,24 @@ key_def_set_part(struct key_def *def, uint32_t part_no, uint32_t fieldno,
 		*path_pool += path_len;
 		memcpy(def->parts[part_no].path, path, path_len);
 		def->parts[part_no].path_len = path_len;
+
+		int rc;
+		struct json_lexer lexer;
+		struct json_token token;
+		json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
+		while ((rc = json_lexer_next_token(&lexer, &token)) == 0) {
+			if (token.type == JSON_TOKEN_ANY) {
+				def->has_multikey_parts = true;
+				def->parts[part_no].is_multikey = true;
+				break;
+			} else if (token.type == JSON_TOKEN_END) {
+				break;
+			}
+		}
 	} else {
 		def->parts[part_no].path = NULL;
 		def->parts[part_no].path_len = 0;
+		def->parts[part_no].is_multikey = false;
 	}
 	column_mask_set_fieldno(&def->column_mask, fieldno);
 }

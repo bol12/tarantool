@@ -691,7 +691,85 @@ s = box.schema.space.create('withdata')
 ...
 idx = s:create_index('idx', {parts = {{3, 'str', path = '[*].fname'}, {3, 'str', path = '[*].sname'}}})
 ---
-- error: Tarantool does not support multikey indexes
+...
+s:insert({1, 1, {{fname='James', sname='Bond'}, {fname='Vasya', sname='Pupkin'}}})
+---
+- [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+s:insert({1, 1, {{fname='Ivan', sname='Ivanych'}}})
+---
+- [1, 1, [{'fname': 'Ivan', 'sname': 'Ivanych'}]]
+...
+idx:select({'James', 'Bond'})
+---
+- - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+idx:select({'Kirill', 'Shcherbatov'})
+---
+- []
+...
+idx:select({'Ivan', 'Ivanych'})
+---
+- - [1, 1, [{'fname': 'Ivan', 'sname': 'Ivanych'}]]
+...
+idx:select({'Vasya', 'Pupkin'})
+---
+- - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+idx:select()
+---
+- - [1, 1, [{'fname': 'Ivan', 'sname': 'Ivanych'}]]
+  - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+  - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+s:insert({2, 1, {{fname='Vasya', sname='Pupkin'}}})
+---
+- error: Duplicate key exists in unique index 'idx' in space 'withdata'
+...
+s:insert({2, 1, {{fname='James', sname='Bond'}}})
+---
+- error: Duplicate key exists in unique index 'idx' in space 'withdata'
+...
+idx:select()
+---
+- - [1, 1, [{'fname': 'Ivan', 'sname': 'Ivanych'}]]
+  - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+  - [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+idx:delete({'Vasya', 'Pupkin'})
+---
+- [1, 1, [{'fname': 'James', 'sname': 'Bond'}, {'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+s:insert({2, 1, {{fname='Vasya', sname='Pupkin'}}})
+---
+- [2, 1, [{'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+s:insert({2, 1, {{fname='James', sname='Bond'}}})
+---
+- [2, 1, [{'fname': 'James', 'sname': 'Bond'}]]
+...
+idx:select()
+---
+- - [1, 1, [{'fname': 'Ivan', 'sname': 'Ivanych'}]]
+  - [2, 1, [{'fname': 'James', 'sname': 'Bond'}]]
+  - [2, 1, [{'fname': 'Vasya', 'sname': 'Pupkin'}]]
+...
+s:drop()
+---
+...
+s = box.schema.space.create('withdata')
+---
+...
+pk = s:create_index('pk')
+---
+...
+idx = s:create_index('idx', {parts = {{3, 'str', path = '[*].fname'}, {3, 'str', path = '[*].extra.sname', is_nullable = true}}})
+---
+...
+s:insert({1, 1, {{fname='A1', extra={sname='A2'}}, {fname='B1'}, {fname='C1', extra={sname='C2'}}}})
+---
+- [1, 1, [{'fname': 'A1', 'extra': {'sname': 'A2'}}, {'fname': 'B1'}, {'fname': 'C1',
+      'extra': {'sname': 'C2'}}]]
 ...
 s:drop()
 ---

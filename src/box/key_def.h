@@ -97,6 +97,8 @@ struct key_part {
 	char *path;
 	/** The length of JSON path. */
 	uint32_t path_len;
+	/** True if this is multikey key part. */
+	bool is_multikey;
 	/**
 	 * Epoch of the tuple format the offset slot cached in
 	 * this part is valid for, see tuple_format::epoch.
@@ -129,6 +131,8 @@ typedef union {
 	 * the tuples themselves.
 	 */
 	uint64_t hint;
+	/** Index of item in the array used in multikey index. */
+	uint64_t multikey_idx;
 } cmp_aux_t;
 
 /** Test if cmp_aux_t a and b are equal. */
@@ -189,7 +193,8 @@ typedef uint32_t (*key_hash_t)(const char *key,
 
 /** @copydoc tuple_cmp_aux() */
 typedef cmp_aux_t (*tuple_cmp_aux_t)(const struct tuple *tuple,
-				     struct key_def *key_def);
+				     struct key_def *key_def,
+				     uint64_t multikey_idx);
 
 /** @copydoc key_cmp_aux() */
 typedef cmp_aux_t (*key_cmp_aux_t)(const char *key, struct key_def *key_def);
@@ -228,6 +233,8 @@ struct key_def {
 	bool is_nullable;
 	/** True if some key part has JSON path. */
 	bool has_json_paths;
+	/** True if some part has array index placeholder *. */
+	bool has_multikey_parts;
 	/**
 	 * True, if some key parts can be absent in a tuple. These
 	 * fields assumed to be MP_NIL.
@@ -723,12 +730,14 @@ key_hash(const char *key, struct key_def *key_def)
  * Get a comparison auxiliary information for a tuple.
  * @param tuple - tuple to get cmp_aux_t of.
  * @param key_def - key_def that defines which comparison is used.
+ * @param multikey_idx - index of multikey array item.
  * @return the comparison auxiliary information.
  */
 static inline cmp_aux_t
-tuple_cmp_aux(const struct tuple *tuple, struct key_def *key_def)
+tuple_cmp_aux(const struct tuple *tuple, struct key_def *key_def,
+	      uint64_t multikey_idx)
 {
-	return key_def->tuple_cmp_aux(tuple, key_def);
+	return key_def->tuple_cmp_aux(tuple, key_def, multikey_idx);
 }
 
 /**

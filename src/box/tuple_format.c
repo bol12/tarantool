@@ -33,6 +33,7 @@
 #include "json/json.h"
 #include "tuple_format.h"
 #include "coll_id_cache.h"
+#include "tuple.h"
 
 #include "third_party/PMurHash.h"
 
@@ -233,14 +234,19 @@ tuple_format_add_field(struct tuple_format *format, uint32_t fieldno,
 	json_lexer_create(&lexer, path, path_len, TUPLE_INDEX_BASE);
 	while ((rc = json_lexer_next_token(&lexer, &field->token)) == 0 &&
 	       field->token.type != JSON_TOKEN_END) {
-		if (field->token.type == JSON_TOKEN_ANY) {
-			diag_set(ClientError, ER_UNSUPPORTED,
-				"Tarantool", "multikey indexes");
-			goto fail;
-		}
 		enum field_type expected_type =
 			field->token.type == JSON_TOKEN_STR ?
 			FIELD_TYPE_MAP : FIELD_TYPE_ARRAY;
+		if (field->token.type == JSON_TOKEN_ANY &&
+		    !json_token_is_multikey(&parent->token) &&
+		    !json_token_is_leaf(&parent->token)) {
+			assert(expected_type == FIELD_TYPE_ARRAY);
+			diag_set(ClientError, ER_INDEX_PART_TYPE_MISMATCH,
+				 tuple_field_path(parent),
+				 field_type_strs[parent->type],
+				 "multikey array");
+			goto fail;
+		}
 		if (field_type1_contains_type2(parent->type, expected_type)) {
 			parent->type = expected_type;
 		} else {
@@ -475,9 +481,8 @@ tuple_format_create(struct tuple_format *format, struct key_def * const *keys,
 					break;
 				format->min_tuple_size += mp_sizeof_nil();
 			}
-		} else {
+		} else if (field->token.type == JSON_TOKEN_STR) {
 			/* Account a key string for map member. */
-			assert(field->token.type == JSON_TOKEN_STR);
 			format->min_tuple_size +=
 				mp_sizeof_str(field->token.len);
 		}
@@ -805,6 +810,59 @@ tuple_format1_can_store_format2_tuples(struct tuple_format *format1,
 	return true;
 }
 
+/**
+ * Grow tuple_field_map allocation left with extent_size
+ * 0 bytes.
+ */
+static int
+tuple_field_map_realloc(uint32_t **field_map, uint32_t *field_map_size,
+			uint32_t extent_size, struct region *region)
+{
+	assert(extent_size % sizeof(uint32_t) == 0);
+	uint32_t new_field_map_size = *field_map_size + extent_size;
+	uint32_t *new_field_map = region_alloc(region, new_field_map_size);
+	if (new_field_map == NULL) {
+		diag_set(OutOfMemory, new_field_map_size, "region_alloc",
+			 "new_field_map");
+		return -1;
+	}
+	memset(new_field_map, 0, extent_size);
+	if (*field_map != NULL) {
+		memcpy((char *)new_field_map + extent_size,
+		       (char *)*field_map - *field_map_size, *field_map_size);
+	}
+	*field_map = (uint32_t *)((char *)new_field_map + new_field_map_size);
+	*field_map_size = new_field_map_size;
+	return 0;
+}
+
+/**
+ * Retrieve tuple field map extent by root_offset_slot, reallocate
+ * memory if required.
+ */
+struct field_map_ext *
+tuple_field_map_ext_retrieve(uint32_t **field_map, uint32_t *field_map_size,
+			     int32_t root_offset_slot, uint32_t extent_items,
+			     struct region *region)
+{
+	uint32_t extent_sz = sizeof(struct field_map_ext) +
+			     extent_items * sizeof(uint32_t);
+	uint32_t slot_off = (*field_map)[root_offset_slot];
+	if (slot_off == 0) {
+		/* Field map extent was not created yet. */
+		slot_off = *field_map_size / sizeof(uint32_t);
+		(*field_map)[root_offset_slot] = slot_off;
+		if (tuple_field_map_realloc(field_map, field_map_size,
+					    extent_sz, region) != 0)
+			return NULL;
+	}
+	struct field_map_ext *field_map_ext =
+		tuple_field_map_ext(*field_map, root_offset_slot);
+	assert(field_map_ext->size == 0 || field_map_ext->size == extent_items);
+	field_map_ext->size = extent_items;
+	return field_map_ext;
+}
+
 /** @sa declaration for details. */
 int
 tuple_field_map_create(struct tuple_format *format, const char *tuple,
@@ -817,14 +875,11 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 		return 0; /* Nothing to initialize */
 	}
 	struct region *region = &fiber()->gc;
-	*field_map_size = format->field_map_size;
-	*field_map = region_alloc(region, *field_map_size);
-	if (*field_map == NULL) {
-		diag_set(OutOfMemory, *field_map_size, "region_alloc",
-			 "field_map");
+	*field_map = NULL;
+	*field_map_size = 0;
+	if (tuple_field_map_realloc(field_map, field_map_size,
+				    format->field_map_size, region) != 0)
 		return -1;
-	}
-	*field_map = (uint32_t *)((char *)*field_map + *field_map_size);
 
 	const char *pos = tuple;
 	int rc = 0;
@@ -865,11 +920,6 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 					   tuple_format_field_count(format) :
 					   format->index_field_count);
 	/*
-	 * Nullify field map to be able to detect by 0,
-	 * which key fields are absent in tuple_field().
-	 */
-	memset((char *)*field_map - *field_map_size, 0, *field_map_size);
-	/*
 	 * Prepare mp stack of the size equal to the maximum depth
 	 * of the indexed field in the format::fields tree
 	 * (fields_depth) to carry out a simultaneous parsing of
@@ -885,6 +935,12 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 	struct mp_stack stack;
 	mp_stack_create(&stack, format->fields_depth, frames);
 	mp_stack_push(&stack, MP_ARRAY, defined_field_count);
+	/**
+	 * Pointer to the stack entry that represents the multikey
+	 * index root ARRAY entry.
+	 */
+	struct mp_frame *mk_parent_frame = NULL;
+
 	struct tuple_field *field;
 	struct json_token *parent = &format->fields.root;
 	while (true) {
@@ -901,6 +957,10 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 			mp_stack_pop(&stack);
 			if (mp_stack_is_empty(&stack))
 				goto finish;
+			if (json_token_is_multikey(parent)) {
+				/* Leave multikey index branch. */
+				mk_parent_frame = NULL;
+			}
 			parent = parent->parent;
 		}
 		/*
@@ -950,8 +1010,23 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 					 field_type_strs[field->type]);
 				goto error;
 			}
-			if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL)
+			if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL &&
+			    mk_parent_frame == NULL) {
 				(*field_map)[field->offset_slot] = pos - tuple;
+			} else if (field->offset_slot != TUPLE_OFFSET_SLOT_NIL &&
+				   mk_parent_frame != NULL) {
+				uint32_t extent_items = mk_parent_frame->count;
+				struct field_map_ext *field_map_ext =
+					tuple_field_map_ext_retrieve(field_map,
+							field_map_size,
+							field->offset_slot,
+							extent_items, region);
+				if (field_map_ext == NULL)
+					goto error;
+				int multikey_idx = mk_parent_frame->curr;
+				field_map_ext->field_map[
+					-multikey_idx] = pos - tuple;
+			}
 			if (required_fields != NULL)
 				bit_clear(required_fields, field->id);
 		}
@@ -968,6 +1043,11 @@ tuple_field_map_create(struct tuple_format *format, const char *tuple,
 					mp_decode_array(&pos) :
 					mp_decode_map(&pos);
 			mp_stack_push(&stack, type, size);
+			if (json_token_is_multikey(&field->token)) {
+				/* Track multikey entry frame. */
+				assert(type == MP_ARRAY);
+				mk_parent_frame = &frames[stack.used - 1];
+			}
 			parent = &field->token;
 		} else {
 			mp_next(&pos);
