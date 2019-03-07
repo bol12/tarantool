@@ -510,30 +510,6 @@ sqlCreateColumnExpr(sql * db, SrcList * pSrc, int iSrc, int iCol)
 }
 
 /*
- * Report an error that an expression is not valid for some set of
- * pNC->ncFlags values determined by validMask.
- */
-static void
-notValid(Parse * pParse,	/* Leave error message here */
-	 NameContext * pNC,	/* The name context */
-	 const char *zMsg,	/* Type of error */
-	 int validMask		/* Set of contexts for which prohibited */
-    )
-{
-	assert((validMask & ~(NC_IsCheck | NC_IdxExpr)) == 0);
-	if ((pNC->ncFlags & validMask) != 0) {
-		const char *zIn;
-		if (pNC->ncFlags & NC_IdxExpr)
-			zIn = "index expressions";
-		else if (pNC->ncFlags & NC_IsCheck)
-			zIn = "CHECK constraints";
-		else
-			unreachable();
-		sqlErrorMsg(pParse, "%s prohibited in %s", zMsg, zIn);
-	}
-}
-
-/*
  * Expression p should encode a floating point value between 1.0 and 0.0.
  * Return 1024 times this value.  Or return -1 if p is not a floating point
  * value between 1.0 and 0.0.
@@ -605,7 +581,10 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			Expr *pRight;
 
 			/* if( pSrcList==0 ) break; */
-			notValid(pParse, pNC, "the \".\" operator", NC_IdxExpr);
+			if (pNC->ncFlags & NC_IdxExpr) {
+				diag_set(ClientError, ER_INDEX_DEF, "'.' operator is");
+				pParse->is_aborted = true;
+			}
 			pRight = pExpr->pRight;
 			if (pRight->op == TK_ID) {
 				zTable = pExpr->pLeft->u.zToken;
@@ -646,6 +625,9 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			} else {
 				is_agg = pDef->xFinalize != 0;
 				pExpr->type = pDef->ret_type;
+				const char *err_msg =
+					"second argument to likelihood() must "\
+					"be a constant between 0.0 and 1.0";
 				if (pDef->funcFlags & SQL_FUNC_UNLIKELY) {
 					ExprSetProperty(pExpr,
 							EP_Unlikely | EP_Skip);
@@ -654,9 +636,11 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 						    exprProbability(pList->a[1].
 								    pExpr);
 						if (pExpr->iTable < 0) {
-							sqlErrorMsg(pParse,
-									"second argument to likelihood() must be a "
-									"constant between 0.0 and 1.0");
+							diag_set(ClientError,
+								 ER_ILLEGAL_PARAMS,
+								 err_msg);
+							pParse->is_aborted =
+								true;
 							pNC->nErr++;
 						}
 					} else {
@@ -690,9 +674,12 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 					 * that might change over time cannot be used
 					 * in an index.
 					 */
-					notValid(pParse, pNC,
-						 "non-deterministic functions",
-						 NC_IdxExpr);
+					if (pNC->ncFlags & NC_IdxExpr) {
+						diag_set(ClientError, ER_INDEX_DEF,
+							 "Non-deterministic functions "\
+							 "are");
+						pParse->is_aborted = true;
+					}
 				}
 			}
 			if (is_agg && (pNC->ncFlags & NC_AllowAgg) == 0) {
@@ -754,8 +741,16 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			testcase(pExpr->op == TK_IN);
 			if (ExprHasProperty(pExpr, EP_xIsSelect)) {
 				int nRef = pNC->nRef;
-				notValid(pParse, pNC, "subqueries",
-					 NC_IsCheck | NC_IdxExpr);
+				if (pNC->ncFlags & NC_IdxExpr) {
+					diag_set(ClientError, ER_INDEX_DEF,
+						 "Subqueries are");
+					pParse->is_aborted = true;
+				} else if (pNC->ncFlags & NC_IsCheck) {
+					diag_set(ClientError,
+						 ER_CHECK_CONSTRAINT_DEF,
+						 "Subqueries are");
+					pParse->is_aborted = true;
+				}
 				sqlWalkSelect(pWalker, pExpr->x.pSelect);
 				assert(pNC->nRef >= nRef);
 				if (nRef != pNC->nRef) {
@@ -766,8 +761,12 @@ resolveExprStep(Walker * pWalker, Expr * pExpr)
 			break;
 		}
 	case TK_VARIABLE:{
-			notValid(pParse, pNC, "parameters",
-				 NC_IsCheck | NC_IdxExpr);
+			assert((pNC->ncFlags & NC_IsCheck) == 0);
+			if (pNC->ncFlags & NC_IdxExpr) {
+				diag_set(ClientError, ER_INDEX_DEF,
+					 "Parameter markers are");
+				pParse->is_aborted = true;
+			}
 			break;
 		}
 	case TK_BETWEEN:
@@ -952,7 +951,10 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
 	db = pParse->db;
 #if SQL_MAX_COLUMN
 	if (pOrderBy->nExpr > db->aLimit[SQL_LIMIT_COLUMN]) {
-		sqlErrorMsg(pParse, "too many terms in ORDER BY clause");
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT,
+			 "The number of terms in ORDER BY clause", 0, "",
+			 pOrderBy->nExpr, db->aLimit[SQL_LIMIT_COLUMN]);
+		pParse->is_aborted = true;
 		return 1;
 	}
 #endif
@@ -1042,27 +1044,34 @@ resolveCompoundOrderBy(Parse * pParse,	/* Parsing context.  Leave error messages
  * field) then convert that term into a copy of the corresponding result set
  * column.
  *
- * If any errors are detected, add an error message to pParse and
- * return non-zero.  Return zero if no errors are seen.
+ * @param pParse Parsing context.
+ * @param pSelect The SELECT statement containing the clause.
+ * @param pOrderBy The ORDER BY or GROUP BY clause to be
+ *                 processed.
+ * @param is_order_by True if pOrderBy is ORDER BY, false if
+ *                    pOrderBy is GROUP BY
+ * @retval 0 On success, not 0 elsewhere.
  */
 int
-sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages here */
-			   Select * pSelect,	/* The SELECT statement containing the clause */
-			   ExprList * pOrderBy,	/* The ORDER BY or GROUP BY clause to be processed */
-			   const char *zType	/* "ORDER" or "GROUP" */
-    )
+sqlResolveOrderGroupBy(Parse *pParse, Select *pSelect, ExprList *pOrderBy,
+		       bool is_order_by)
 {
 	int i;
 	sql *db = pParse->db;
 	ExprList *pEList;
 	struct ExprList_item *pItem;
+	const char *zType = is_order_by ? "ORDER" : "GROUP";
 
 	if (pOrderBy == 0 || pParse->db->mallocFailed)
 		return 0;
 #if SQL_MAX_COLUMN
 	if (pOrderBy->nExpr > db->aLimit[SQL_LIMIT_COLUMN]) {
-		sqlErrorMsg(pParse, "too many terms in %s BY clause",
-				zType);
+		const char *err_msg =
+			is_order_by ? "The number of terms in ORDER BY clause" :
+				      "The number of terms in GROUP BY clause";
+		diag_set(ClientError, ER_SQL_PARSER_LIMIT, err_msg, 0, "",
+			 pOrderBy->nExpr, db->aLimit[SQL_LIMIT_COLUMN]);
+		pParse->is_aborted = true;
 		return 1;
 	}
 #endif
@@ -1096,22 +1105,23 @@ sqlResolveOrderGroupBy(Parse * pParse,	/* Parsing context.  Leave error messages
  * result-set expression.  Otherwise, the expression is resolved in
  * the usual way - using sqlResolveExprNames().
  *
- * This routine returns the number of errors.  If errors occur, then
- * an appropriate error message might be left in pParse.  (OOM errors
- * excepted.)
+ * @param pNC The name context of the SELECT statement.
+ * @param pSelect The SELECT statement containing the clause.
+ * @param pOrderBy An ORDER BY or GROUP BY clause to resolve.
+ * @param is_order_by True if pOrderBy is ORDER BY, false if
+ *                    pOrderBy is GROUP BY
+ * @retval 0 On success, not 0 elsewhere.
  */
 static int
-resolveOrderGroupBy(NameContext * pNC,	/* The name context of the SELECT statement */
-		    Select * pSelect,	/* The SELECT statement holding pOrderBy */
-		    ExprList * pOrderBy,	/* An ORDER BY or GROUP BY clause to resolve */
-		    const char *zType	/* Either "ORDER" or "GROUP", as appropriate */
-    )
+resolveOrderGroupBy(NameContext *pNC, Select *pSelect, ExprList *pOrderBy,
+		    bool is_order_by)
 {
 	int i, j;		/* Loop counters */
 	int iCol;		/* Column number */
 	struct ExprList_item *pItem;	/* A term of the ORDER BY clause */
 	Parse *pParse;		/* Parsing context */
 	int nResult;		/* Number of terms in the result set */
+	const char *zType = is_order_by ? "ORDER" : "GROUP";
 
 	if (pOrderBy == 0)
 		return 0;
@@ -1158,7 +1168,7 @@ resolveOrderGroupBy(NameContext * pNC,	/* The name context of the SELECT stateme
 			}
 		}
 	}
-	return sqlResolveOrderGroupBy(pParse, pSelect, pOrderBy, zType);
+	return sqlResolveOrderGroupBy(pParse, pSelect, pOrderBy, is_order_by);
 }
 
 /*
@@ -1397,7 +1407,7 @@ resolveSelectStep(Walker * pWalker, Select * p)
 		 * resolve those symbols on the incorrect ORDER BY for consistency.
 		 */
 		if (isCompound <= nCompound	/* Defer right-most ORDER BY of a compound */
-		    && resolveOrderGroupBy(&sNC, p, p->pOrderBy, "ORDER")
+		    && resolveOrderGroupBy(&sNC, p, p->pOrderBy, true)
 		    ) {
 			return WRC_Abort;
 		}
@@ -1411,7 +1421,7 @@ resolveSelectStep(Walker * pWalker, Select * p)
 		if (pGroupBy) {
 			struct ExprList_item *pItem;
 
-			if (resolveOrderGroupBy(&sNC, p, pGroupBy, "GROUP")
+			if (resolveOrderGroupBy(&sNC, p, pGroupBy, false)
 			    || db->mallocFailed) {
 				return WRC_Abort;
 			}

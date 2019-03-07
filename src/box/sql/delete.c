@@ -157,8 +157,9 @@ sql_table_delete_from(struct Parse *parse, struct SrcList *tab_list,
 			goto delete_from_cleanup;
 
 		if (trigger_list == NULL) {
-			sqlErrorMsg(parse, "cannot modify %s because it is a"
-					" view", space->def->name);
+			diag_set(ClientError, ER_ALTER_SPACE, space->def->name,
+				 "it is a view");
+			parse->is_aborted = true;
 			goto delete_from_cleanup;
 		}
 	}

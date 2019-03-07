@@ -36,7 +36,7 @@ test:do_catchsql_test(
         );
     ]], {
         -- <unique-1.1>
-        1, [[table "T1" has more than one primary key]]
+        1, [[Failed to create space 'T1': too many primary keys]]
         -- </unique-1.1>
     })
 

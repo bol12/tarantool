@@ -4409,7 +4409,7 @@ int sqlMatchSpanName(const char *, const char *, const char *);
 int sqlResolveExprNames(NameContext *, Expr *);
 int sqlResolveExprListNames(NameContext *, ExprList *);
 void sqlResolveSelectNames(Parse *, Select *, NameContext *);
-int sqlResolveOrderGroupBy(Parse *, Select *, ExprList *, const char *);
+int sqlResolveOrderGroupBy(Parse *, Select *, ExprList *, bool);
 
 /**
  * Generate code for default value.
@@ -4617,7 +4617,6 @@ sql_int64 sqlStmtCurrentTime(sql_context *);
 int sqlVdbeParameterIndex(Vdbe *, const char *, int);
 int sqlTransferBindings(sql_stmt *, sql_stmt *);
 int sqlReprepare(Vdbe *);
-void sqlExprListCheckLength(Parse *, ExprList *, const char *);
 
 /**
  * This function verifies that two collations (to be more precise
